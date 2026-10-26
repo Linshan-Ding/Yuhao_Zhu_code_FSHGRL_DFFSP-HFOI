@@ -19,13 +19,27 @@ if str(ROOT_DIR) not in sys.path:
 from agent.checkpoint import load_checkpoint, save_checkpoint
 from agent.ppo import PPO
 from agent.visualization import TrainingVisualizer
+from configs.config import load_config as load_yaml_config, to_legacy_config
 from data.dataset import resolve_instance_files, select_instance
 from rollout import collect_vectorized_rollouts
 
 
-def load_config(config_path: Path) -> dict:
-    with config_path.open("r", encoding="utf-8") as file:
-        return json.load(file)
+def load_config(config_paths) -> dict:
+    """Return the legacy-shaped config dict ({"model_paras", "train_paras"}).
+
+    Accepts one legacy JSON file or one or more YAML overlays (default:
+    configs/instance.yaml, configs/env.yaml, configs/algo.yaml).
+    """
+    if config_paths is None:
+        return to_legacy_config(load_yaml_config())
+    paths = [Path(item) for item in config_paths]
+    if len(paths) == 1 and paths[0].suffix.lower() == ".json":
+        with paths[0].open("r", encoding="utf-8") as file:
+            return json.load(file)
+    return to_legacy_config(load_yaml_config(paths))
+
+
+SMOKE_OVERRIDES = {"max_iterations": 2, "num_envs": 2, "num_workers": 2, "minibatch_size": 128, "viz": False}
 
 
 def resolve_data_dir(path_value: str) -> Path:
@@ -164,21 +178,25 @@ def apply_lr_schedule(model: PPO, train_paras: dict, iteration: int, max_iterati
 
 def main():
     parser = argparse.ArgumentParser(description="Parallel HGNN-PPO trainer")
-    parser.add_argument("--config", default=str(ROOT_DIR / "data" / "config.json"))
+    parser.add_argument("--config", nargs="+", default=None,
+                        help="YAML overlays (default: configs/instance.yaml env.yaml algo.yaml) or one legacy JSON file")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-iterations", type=int, default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--rollout-device", default=None)
     parser.add_argument("--update-device", default=None)
     parser.add_argument("--data-dir", default=None)
-    parser.add_argument("--experiment-name", default=None)
+    parser.add_argument("--experiment-name", "--run-name", dest="experiment_name", default=None)
+    parser.add_argument("--smoke", action="store_true", help="2 iterations, 2 environments, no Visdom")
     parser.add_argument("--instances", nargs="*", default=None)
     parser.add_argument("--instance-selection", choices=["fixed", "round_robin", "random"], default=None)
     parser.add_argument("--resume", choices=["auto", "none"], default=None)
     args = parser.parse_args()
 
-    config = load_config(Path(args.config))
+    config = load_config(args.config)
     train_paras = dict(config["train_paras"])
+    if args.smoke:
+        train_paras.update(SMOKE_OVERRIDES)
     if args.max_iterations is not None:
         train_paras["max_iterations"] = args.max_iterations
     if args.instance_selection is not None:
