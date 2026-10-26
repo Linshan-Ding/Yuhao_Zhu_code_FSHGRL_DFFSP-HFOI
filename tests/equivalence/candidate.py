@@ -22,4 +22,4 @@ def run_candidate(base_config: dict, model_type: str, log_path: Path) -> Path:
     """
     experiment_name = f"eq_{model_type}"
     shutil.rmtree(ROOT / "result" / experiment_name, ignore_errors=True)  # the trainer appends to an existing CSV
-    return run_legacy_train(ROOT, base_config, model_type, experiment_name, log_path)
+    return run_legacy_train(ROOT, base_config, model_type, experiment_name, log_path, entry="train.py")

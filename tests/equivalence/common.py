@@ -91,8 +91,8 @@ def run_subprocess(cmd: list[str], cwd: Path, log_path: Path) -> None:
 
 
 def run_legacy_train(tree_root: Path, base_config: dict, model_type: str, experiment_name: str,
-                     log_path: Path) -> Path:
-    """Run the original entry point `agent/train.py` inside `tree_root`.
+                     log_path: Path, entry: str = "agent/train.py") -> Path:
+    """Run a trainer entry script (legacy CLI) inside `tree_root`.
 
     Returns the result directory `<tree_root>/result/<experiment_name>`.
     """
@@ -101,7 +101,7 @@ def run_legacy_train(tree_root: Path, base_config: dict, model_type: str, experi
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
     cmd = [
-        sys.executable, "agent/train.py",
+        sys.executable, entry,
         "--config", str(config_path),
         "--seed", str(SEED),
         "--max-iterations", str(MAX_ITERATIONS),

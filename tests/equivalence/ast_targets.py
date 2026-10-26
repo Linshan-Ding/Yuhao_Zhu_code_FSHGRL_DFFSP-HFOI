@@ -8,15 +8,15 @@ when a function moves.
 """
 TARGETS = [
     ("agent/training_simulator.py", "TrainingSimulator._solve_cached_lp",
-     "agent/training_simulator.py", "TrainingSimulator._solve_cached_lp"),
+     "environment/simulator.py", "TrainingSimulator._solve_cached_lp"),
     ("agent/training_simulator.py", "TrainingSimulator._fluid_cache_key",
-     "agent/training_simulator.py", "TrainingSimulator._fluid_cache_key"),
+     "environment/simulator.py", "TrainingSimulator._fluid_cache_key"),
     ("agent/training_simulator.py", "TrainingSimulator._fluid_features",
-     "agent/training_simulator.py", "TrainingSimulator._fluid_features"),
+     "environment/simulator.py", "TrainingSimulator._fluid_features"),
     ("agent/training_simulator.py", "TrainingSimulator._load_gurobi",
-     "agent/training_simulator.py", "TrainingSimulator._load_gurobi"),
-    ("agent/train.py", "apply_lr_schedule", "agent/train.py", "apply_lr_schedule"),
-    ("agent/train.py", "load_checkpoint", "agent/train.py", "load_checkpoint"),
-    ("agent/train.py", "prepare_rollout_policy", "agent/train.py", "prepare_rollout_policy"),
-    ("agent/sci_rollout.py", "select_instance", "agent/sci_rollout.py", "select_instance"),
+     "environment/simulator.py", "TrainingSimulator._load_gurobi"),
+    ("agent/train.py", "apply_lr_schedule", "train.py", "apply_lr_schedule"),
+    ("agent/train.py", "load_checkpoint", "agent/checkpoint.py", "load_checkpoint"),
+    ("agent/train.py", "prepare_rollout_policy", "train.py", "prepare_rollout_policy"),
+    ("agent/sci_rollout.py", "select_instance", "data/dataset.py", "select_instance"),
 ]
