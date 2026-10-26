@@ -6,6 +6,7 @@ result/paired_tests.csv. Each file holds a booktabs tabular body to \\input into
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -18,8 +19,8 @@ import pandas as pd  # noqa: E402
 from result.aggregate import load_eval_results, point_estimates  # noqa: E402
 from result.stats import DRL_METHODS, METHOD_LABELS, RULE_METHODS  # noqa: E402
 
-RESULT = ROOT / "result"
-TABLES = ROOT / "paper_assets" / "tables"
+RESULT = Path(os.environ.get("FSHGRL_RESULT_DIR", ROOT / "result"))          # redirected by run_00_smoke.py
+TABLES = Path(os.environ.get("FSHGRL_TABLE_DIR", ROOT / "paper_assets" / "tables"))
 
 
 def _fmt(value, digits=4):

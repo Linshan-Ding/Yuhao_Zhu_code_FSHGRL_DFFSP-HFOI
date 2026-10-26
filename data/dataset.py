@@ -212,3 +212,8 @@ def benchmark_instance_files(instance_ids: Sequence[str] | None = None,
     index = load_index()
     ordered = [iid for iid in index if iid in by_id] + sorted(iid for iid in by_id if iid not in index)
     return [by_id[iid] for iid in ordered]
+
+
+if __name__ == "__main__":   # python -m data.dataset  (scripts/run_01_prepare_data.py)
+    _rows = prepare_benchmark()
+    print(f"[DATA] {len(_rows)} benchmark instances indexed -> {INDEX_PATH}")
