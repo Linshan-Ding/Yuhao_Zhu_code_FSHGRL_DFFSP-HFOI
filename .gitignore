@@ -14,3 +14,5 @@ result/*
 photo/
 .pytest_cache/
 tests/golden/_work/
+paper_assets/figures/generated/
+paper_assets/tables/*.tex
