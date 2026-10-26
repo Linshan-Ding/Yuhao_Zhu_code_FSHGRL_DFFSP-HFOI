@@ -1,7 +1,6 @@
 """
 训练算法：异质神经网络定义、策略网络定义、值网络定义、PPO算法
 """
-import copy
 import time
 import torch
 import torch.nn as nn
@@ -14,39 +13,7 @@ except ImportError:
     from hgnn import GATedge, MLPsim
     from mlp import MLPCritic, MLPActor
 from typing import Tuple, List
-import random
 
-
-class Memory:
-    def __init__(self):
-        self.states = []
-        self.log_probs = []
-        self.rewards = []
-        self.is_terminals = []
-        self.action_indexes = []
-
-        self.ope_ma_adj = []
-        self.ope_pre_adj = []
-        self.ope_sub_adj = []
-        self.raw_opes = []
-        self.raw_mas = []
-        self.proc_time = []
-        self.eligible = []
-
-    def clear_memory(self):
-        del self.states[:]
-        del self.log_probs[:]
-        del self.rewards[:]
-        del self.is_terminals[:]
-        del self.action_indexes[:]
-
-        del self.ope_ma_adj[:]
-        del self.ope_pre_adj[:]
-        del self.ope_sub_adj[:]
-        del self.raw_opes[:]
-        del self.raw_mas[:]
-        del self.proc_time[:]
-        del self.eligible[:]
 
 class MLPs(nn.Module):
     """
@@ -216,11 +183,6 @@ class HGNNScheduler(nn.Module):
                 self.sparse_order_norm = nn.LayerNorm(sparse_feature_dim).to(self.device)
         self.last_forward_stats = {}
 
-    def forward(self) -> None:
-        """
-        本模块仅提供 act 与 evaluate 函数，forward 接口不使用。
-        """
-        raise NotImplementedError("Use act() or evaluate() functions instead.")
 
     def feature_normalize(self, data: torch.Tensor) -> torch.Tensor:
         """对单个实例特征归一化"""
@@ -248,161 +210,6 @@ class HGNNScheduler(nn.Module):
         norm_mas = (raw_mas - mean_mas) / (std_mas + 1e-5)  # 标准化机器特征
         return norm_opes, norm_mas, proc_time_norm
 
-    def get_action_prob(self, state, memory, flag_train=True):
-        """
-        根据状态数据计算各候选 O-M 对的选择概率。
-        state 应包含以下字段：
-          - feat_opes: [num_opes, in_size_ope]
-          - feat_mas: [num_mas, in_size_ma]
-          - proc_times: [num_opes, num_mas]
-          - nums_opes: 工序节点个数（int）
-          - ope_step: 当前待处理的工序索引 [num_opes]（或其他标识信息）
-          - ope_ma_adj: 工序-机器邻接矩阵 [num_opes, num_mas]
-          - ope_pre_adj: 工序-前序邻接矩阵 [num_opes, num_opes]
-          - ope_sub_adj: 工序-后序邻接矩阵 [num_opes, num_opes]
-          - mask_ma_procing: 机器处理状态掩码 [num_mas]（False 表示空闲）
-          - mask_job_procing & mask_job_finish: 作业是否处于处理中或已经完成 [num_opes]
-        由于本版本为单实例，所有数据均为二维张量或向量，不含 batch 维度。
-        返回：
-          - action_probs: 每个候选动作的选择概率（已将不合法动作屏蔽为 -inf 后 softmax 归一化）
-          - ope_step: 当前待处理工序索引（用于后续计算动作）
-          - h_pooled: 拼接后的全局状态特征，用于辅助决策（可选）
-        """
-        # 提取原始特征
-        raw_opes: torch.Tensor = state.feat_opes.unsqueeze(0).to(self.device)  # shape: [batch, num_opes, in_size_ope]
-        raw_mas: torch.Tensor = state.feat_mas.unsqueeze(0).to(self.device)  # shape: [batch, num_mas, in_size_ma]
-        proc_time: torch.Tensor = state.proc_times.unsqueeze(0).to(self.device)  # shape: [batch, num_opes, num_mas]
-
-        # 是否标准化
-        norm_opes, norm_mas, norm_proc = self.get_normalized(raw_opes, raw_mas, proc_time)
-        # norm_opes, norm_mas, norm_proc = raw_opes, raw_mas, proc_time
-
-        # 邻接矩阵
-        ope_ma_adj: torch.Tensor = state.ope_ma_adj.unsqueeze(0).to(self.device)  # shape: [batch, num_opes, num_mas]
-        ope_pre_adj: torch.Tensor = state.ope_pre_adj.unsqueeze(0).to(self.device)  # shape: [batch, num_opes, num_opes]
-        ope_sub_adj: torch.Tensor = state.ope_sub_adj.unsqueeze(0).to(self.device)  # shape: [batch, num_opes, num_opes]
-        # eligible: torch.Tensor = state.eligible_fluid.unsqueeze(0).to(self.device)  # shape: [batch, num_opes, num_mas]
-        """去流体"""
-        eligible: torch.Tensor = state.eligible.unsqueeze(0).to(self.device)  # shape: [batch, num_opes, num_mas]
-        # features用于后续 HGNN 传播，结构为 (ope_features, mas_features, proc_time)
-        features: Tuple[torch.Tensor, torch.Tensor, torch.Tensor] = (norm_opes, norm_mas, norm_proc)
-
-        # L 次 HGNN 传播（这里 L 等于 self.num_heads 的长度）
-        for i in range(len(self.num_heads)):
-            # 第一阶段：机器节点嵌入，得到 h_mas: [batch, num_mas, out_size_ma]
-            h_mas: torch.Tensor = self.get_machines[i](ope_ma_adj, features)  # 传入 features 整体作为额外信息
-            # 更新 features 第二分量为机器嵌入
-            features = (features[0], h_mas, features[2])
-            # 第二阶段：工序节点嵌入，得到 h_opes: [batch, num_opes, out_size_ope]
-            h_opes: torch.Tensor = self.get_operations[i](ope_ma_adj,
-                                                          ope_pre_adj,
-                                                          ope_sub_adj,
-                                                          features)
-            # 更新 features 第一分量为工序嵌入
-            features = (h_opes, features[1], features[2])
-
-        # 对机器节点及工序节点分别做 pooling（取均值）
-        h_mas_pooled: torch.Tensor = torch.mean(h_mas, dim=-2)  # shape: [batch, out_size_ma]
-        h_opes_pooled: torch.Tensor = torch.mean(h_opes, dim=-2)  # shape: [batch, out_size_ope]
-
-        # 提取每种工序中的订单交期形成二维列表
-        max_long_due_date_list = max(state.kind_task_idle_id_due_date_list.values(), key=len)
-        max_long = len(max_long_due_date_list)  # 每个工序类型的最大订单数
-        eligibles = eligible.unsqueeze(-1).expand(-1, -1, -1, max_long).clone()
-        h_ords_tensor = torch.full((len(state.kind_task_tuple), len(max_long_due_date_list)), 0, device=self.device, dtype=torch.float32)
-        for key, values in state.kind_task_idle_id_due_date_list.items():
-            kind_task_index = state.kind_task_tuple.index(key)
-            for index, due_date in enumerate(values):
-                h_ords_tensor[kind_task_index, index] = due_date
-            # 从eligible中隐去不可选订单索引
-            if 0 < len(values) < max_long:
-                eligibles[:, kind_task_index, :, len(values):] = False
-
-        # 计算不同订单的交期均值和标准差
-        mean_ords_tensor = torch.mean(h_ords_tensor)
-        std_ords_tensor = torch.std(h_ords_tensor, unbiased=False)
-        h_ords_tensor = (h_ords_tensor - mean_ords_tensor) / (std_ords_tensor + 1e-5)
-        h_ords_padding = h_ords_tensor.unsqueeze(0).unsqueeze(-1).unsqueeze(-3).expand(-1, -1, ope_ma_adj.size(-1), -1, -1)
-
-        # 扩展 h_opes 与 h_mas 信息以匹配动作计算所需尺寸
-        h_opes_padding = h_opes.unsqueeze(-2).unsqueeze(-2).expand(-1, -1, ope_ma_adj.size(-1), max_long, -1)  # [batch, num_opes, num_mas, num_ords, out_size_ope]
-        h_mas_padding = h_mas.unsqueeze(-3).unsqueeze(-2).expand(-1, ope_ma_adj.size(-2), -1, max_long, -1)  # [batch, num_opes, num_mas, num_ords, out_size_ope]
-        # 同理，对全局 pooling信息扩展到相同尺寸
-        h_mas_pooled_padding = h_mas_pooled.expand_as(h_opes_padding)  # [batch, num_opes, num_mas, num_ords, out_size_ma]
-        h_opes_pooled_padding = h_opes_pooled.expand_as(h_opes_padding)  # [batch, num_opes, num_mas, num_ords, out_size_ope]
-        h_rate_padding = torch.tensor(state.current_order_completed_rate, device=self.device).expand_as(h_ords_padding)
-        """拼接形成 actor 网络的输入：每个动作候选的特征组合"""
-        # 形状：[batch, num_mas, num_opes, num_ords, out_size_ma + out_size_ope + out_size_ope + out_size_ma+1]
-        h_actions = torch.cat((h_opes_padding, h_mas_padding,
-                               h_opes_pooled_padding, h_mas_pooled_padding, h_ords_padding, h_rate_padding), dim=-1).transpose(1, 2)
-        if torch.isnan(h_actions).any():
-            print("组合动作存咋Nan")
-        # 更新新的动作字典
-        self.current_action_dict = {action_index: (action1, action2) for action_index, (action1, action2) in
-                                    enumerate([(i, j) for i in state.action_dict.keys() for j in range(max_long)])}
-        # 候选动作合法性掩码：结合ope_ma_adj与作业/机器状态（这里简化为直接使用 ope_ma_adj 的值）
-        mask = eligibles.transpose(1, 2).flatten(1)  # 转置后展平，得到 [batch, num_mas * num_opes]
-
-        # 经过 actor 网络计算动作得分
-        scores: torch.Tensor = self.actor(h_actions.float()).flatten(1)  # [batch, num_mas * num_opes]
-        # 对不合法动作赋予 -inf （注意：eligible 为 True 标示合法）
-        scores[~mask] = float('-inf')
-        action_probs: torch.Tensor = F.softmax(scores, dim=1)  # 计算动作概率分布
-
-        # 如果action_probs 中有 NaN，输出state中的各属性值
-        if torch.isnan(action_probs).any():
-            print("kind_task_available_list:", state.kind_task_available_list)
-            print("h_ords_tensor:", h_ords_tensor)
-            print("达成率", state.current_order_completed_rate)
-            print("最大得分:", torch.max(scores))
-
-        if flag_train:
-            memory.ope_ma_adj.append(copy.deepcopy(ope_ma_adj))
-            memory.ope_pre_adj.append(copy.deepcopy(ope_pre_adj))
-            memory.ope_sub_adj.append(copy.deepcopy(ope_sub_adj))
-            memory.raw_opes.append(copy.deepcopy(raw_opes))
-            memory.raw_mas.append(copy.deepcopy(raw_mas))
-            memory.proc_time.append(copy.deepcopy(proc_time))
-            memory.eligible.append(copy.deepcopy(eligible))
-
-        h_opes_mas = torch.cat((h_opes_pooled, h_mas_pooled), dim=-1)
-
-        return action_probs, h_opes_mas
-
-    def act(self, state: object, memory, epoch, flag_sample: bool = True):
-        """
-        根据当前状态 sample 得到动作。返回的动作包含三个部分：
-          - opes: 当前操作索引
-          - mas: 所选机器索引
-        """
-        if hasattr(state, "to_policy_obs"):
-            obs = state.to_policy_obs()
-            action_indexes, log_probs, _, env_actions = self.act_batch([obs], sample=flag_sample)
-            env_action = env_actions[0]
-            return action_indexes[0], log_probs[0], env_action[0], env_action[1]
-
-        action_probs, h_opes_mas = self.get_action_prob(state, memory)
-        train_flag = True  # 前500周期动作随机选择开关
-
-        epsilon = max(self.epsilon * (1000- epoch)/1000, 0.001)
-
-        if random.random() < epsilon and train_flag:
-            valid_actions = torch.nonzero(action_probs > 0, as_tuple=False)
-            # 随机选择动作
-            idx = random.choice(valid_actions.tolist())
-            action_index = torch.tensor(idx[1], device=action_probs.device)
-            log_prob = torch.log(action_probs[idx[0], action_index])
-        else:
-            dist = Categorical(action_probs)
-            action_index = dist.sample()
-            log_prob = dist.log_prob(action_index)  # 记录动作的 log 概率
-
-        # 选择具体订单动作
-        action = action_index.item()  # 工序类型选择策略网络选择的动作
-        # 选择工序类型-机器、订单的动作组合
-        action1, action2 = self.current_action_dict[action]
-
-        return action_index, log_prob, action1, action2
 
     def _pad_obs_batch(self, obs_batch):
         batch_size = len(obs_batch)
@@ -439,72 +246,6 @@ class HGNNScheduler(nn.Module):
             padded["current_rate"][batch_index] = float(obs["current_order_completed_rate"])
         return padded
 
-    def _policy_forward_batch(self, obs_batch):
-        start_time = time.perf_counter()
-        batch = self._pad_obs_batch(obs_batch)
-        raw_opes, raw_mas, proc_time = batch["raw_opes"], batch["raw_mas"], batch["proc_time"]
-        ope_ma_adj, ope_pre_adj, ope_sub_adj = batch["ope_ma_adj"], batch["ope_pre_adj"], batch["ope_sub_adj"]
-        eligible = batch["eligible"]
-        features = self.get_normalized(raw_opes, raw_mas, proc_time)
-        for i in range(len(self.num_heads)):
-            h_mas = self.get_machines[i](ope_ma_adj, features)
-            features = (features[0], h_mas, features[2])
-            h_opes = self.get_operations[i](ope_ma_adj, ope_pre_adj, ope_sub_adj, features)
-            features = (h_opes, features[1], features[2])
-        batch_size, max_opes, _ = h_opes.shape
-        max_mas = h_mas.size(1)
-        max_orders = batch["due_dates"].size(-1)
-        h_mas_pooled = torch.mean(h_mas, dim=-2)
-        h_opes_pooled = torch.mean(h_opes, dim=-2)
-        due_dates = batch["due_dates"]
-        valid_due_dates = due_dates[batch["order_mask"]]
-        if valid_due_dates.numel() > 0:
-            due_dates = (due_dates - valid_due_dates.mean()) / (valid_due_dates.std(unbiased=False) + 1e-5)
-
-        pair_due = due_dates[:, :, :1].expand(-1, -1, max_mas).transpose(1, 2).unsqueeze(-1)
-        pair_rate = batch["current_rate"][:, None, None, None].expand(batch_size, max_mas, max_opes, 1)
-        pair_features = torch.cat((
-            h_opes[:, None, :, :].expand(-1, max_mas, -1, -1),
-            h_mas[:, :, None, :].expand(-1, -1, max_opes, -1),
-            h_opes_pooled[:, None, None, :].expand(-1, max_mas, max_opes, -1),
-            h_mas_pooled[:, None, None, :].expand(-1, max_mas, max_opes, -1),
-            pair_due,
-            pair_rate,
-        ), dim=-1)
-
-        pair_mask = eligible.transpose(1, 2).flatten(1)
-        no_valid = ~pair_mask.any(dim=1)
-        if no_valid.any():
-            pair_mask[no_valid, 0] = True
-        pair_scores = self.actor(pair_features.float()).squeeze(-1).flatten(1).masked_fill(~pair_mask, -1e9)
-        pair_probs = F.softmax(pair_scores, dim=1)
-
-        h_ords_padding = due_dates.unsqueeze(1).unsqueeze(-1).expand(-1, max_mas, -1, -1, -1)
-        order_features = torch.cat((
-            h_opes[:, None, :, None, :].expand(-1, max_mas, -1, max_orders, -1),
-            h_mas[:, :, None, None, :].expand(-1, -1, max_opes, max_orders, -1),
-            h_opes_pooled[:, None, None, None, :].expand(-1, max_mas, max_opes, max_orders, -1),
-            h_mas_pooled[:, None, None, None, :].expand(-1, max_mas, max_opes, max_orders, -1),
-            h_ords_padding,
-            batch["current_rate"][:, None, None, None, None].expand(batch_size, max_mas, max_opes, max_orders, 1),
-        ), dim=-1)
-        order_scores = self.order_actor(order_features.float()).squeeze(-1)
-        order_mask = eligible.transpose(1, 2).unsqueeze(-1) & batch["order_mask"].unsqueeze(1)
-        if no_valid.any():
-            order_mask[no_valid, 0, 0, 0] = True
-
-        state_values = self.critic(torch.cat((h_opes_pooled, h_mas_pooled,
-                                              batch["current_rate"].view(batch_size, 1)), dim=-1)).squeeze(-1)
-        valid_tokens = order_mask.flatten(1).sum(dim=1).float()
-        total_tokens = max(order_mask[0].numel(), 1)
-        self.last_forward_stats = {
-            "batch_size": int(batch_size),
-            "avg_action_tokens": float(valid_tokens.mean().detach().cpu().item()),
-            "max_action_tokens": float(valid_tokens.max().detach().cpu().item()),
-            "padding_ratio": float(1.0 - valid_tokens.sum().detach().cpu().item() / max(batch_size * total_tokens, 1)),
-            "forward_seconds": float(time.perf_counter() - start_time),
-        }
-        return pair_probs, order_scores, order_mask, state_values, batch
 
     def _has_sparse_candidates(self, obs_batch):
         return bool(obs_batch) and all("valid_pairs" in obs and "order_counts" in obs for obs in obs_batch)
@@ -662,176 +403,18 @@ class HGNNScheduler(nn.Module):
     def act_batch(self, obs_batch, sample=True):
         if self._has_sparse_candidates(obs_batch):
             return self._act_batch_sparse(obs_batch, sample=sample)
-        pair_probs, order_scores, order_mask, state_values, batch = self._policy_forward_batch(obs_batch)
-        pair_dist = Categorical(pair_probs)
-        pair_indexes = pair_dist.sample() if sample else pair_probs.argmax(dim=1)
-        batch_indexes = torch.arange(len(obs_batch), device=self.device)
-        max_opes = batch["raw_opes"].size(1)
-        max_orders = batch["due_dates"].size(2)
-        flat_order_scores = order_scores.reshape(len(obs_batch), -1, max_orders)
-        flat_order_mask = order_mask.reshape(len(obs_batch), -1, max_orders)
-        selected_order_scores = flat_order_scores[batch_indexes, pair_indexes]
-        selected_order_mask = flat_order_mask[batch_indexes, pair_indexes]
-        no_order = ~selected_order_mask.any(dim=1)
-        if no_order.any():
-            selected_order_mask[no_order, 0] = True
-        selected_order_scores = selected_order_scores.masked_fill(~selected_order_mask, -1e9)
-        order_probs = F.softmax(selected_order_scores, dim=1)
-        order_dist = Categorical(order_probs)
-        order_indexes = order_dist.sample() if sample else order_probs.argmax(dim=1)
-        log_probs = pair_dist.log_prob(pair_indexes) + order_dist.log_prob(order_indexes)
-        action_indexes = pair_indexes * max_orders + order_indexes
-        env_actions = []
-        for batch_index, pair_index in enumerate(pair_indexes.tolist()):
-            obs = obs_batch[batch_index]
-            local_tasks = int(obs.get("num_tasks", obs["raw_opes"].size(0)))
-            machine_index = int(pair_index) // max_opes
-            task_index = int(pair_index) % max_opes
-            env_actions.append((machine_index * local_tasks + task_index, int(order_indexes[batch_index].item())))
-        return action_indexes, log_probs, state_values, env_actions
-
-    def _env_actions_to_pair_order_indexes(self, obs_batch, env_actions, max_opes: int, max_orders: int):
-        pair_indexes = []
-        order_indexes = []
-        for obs, env_action in zip(obs_batch, env_actions):
-            action1, order_index = env_action
-            local_tasks = int(obs.get("num_tasks", obs["raw_opes"].size(0)))
-            task_index = int(action1) % local_tasks
-            machine_index = int(action1) // local_tasks
-            pair_indexes.append(machine_index * max_opes + task_index)
-            order_indexes.append(min(max(int(order_index), 0), max_orders - 1))
-        return (
-            torch.tensor(pair_indexes, dtype=torch.long, device=self.device),
-            torch.tensor(order_indexes, dtype=torch.long, device=self.device),
+        raise RuntimeError(
+            "observations without 'valid_pairs'/'order_counts' are not supported: "
+            "the legacy dense batch path was removed in the refactor"
         )
 
-    def _env_actions_to_padded_indexes(self, obs_batch, env_actions):
-        max_opes = max(obs["raw_opes"].size(0) for obs in obs_batch)
-        max_orders = max(obs["due_dates"].size(1) for obs in obs_batch)
-        pair_indexes, order_indexes = self._env_actions_to_pair_order_indexes(obs_batch, env_actions, max_opes, max_orders)
-        return pair_indexes * max_orders + order_indexes
 
     def evaluate_batch(self, obs_batch, actions):
         if self._has_sparse_candidates(obs_batch) and not torch.is_tensor(actions):
             return self._evaluate_batch_sparse(obs_batch, actions)
-        pair_probs, order_scores, order_mask, state_values, batch = self._policy_forward_batch(obs_batch)
-        pair_dist = Categorical(pair_probs)
-        batch_size = len(obs_batch)
-        max_orders = batch["due_dates"].size(2)
-        max_opes = batch["raw_opes"].size(1)
-        if torch.is_tensor(actions):
-            action_indexes = actions.to(self.device).long()
-            pair_indexes = torch.div(action_indexes, max_orders, rounding_mode="floor")
-            order_indexes = action_indexes % max_orders
-        else:
-            pair_indexes, order_indexes = self._env_actions_to_pair_order_indexes(obs_batch, actions, max_opes, max_orders)
-
-        batch_indexes = torch.arange(batch_size, device=self.device)
-        flat_order_scores = order_scores.reshape(batch_size, -1, max_orders)
-        flat_order_mask = order_mask.reshape(batch_size, -1, max_orders)
-        selected_order_scores = flat_order_scores[batch_indexes, pair_indexes]
-        selected_order_mask = flat_order_mask[batch_indexes, pair_indexes]
-        no_order = ~selected_order_mask.any(dim=1)
-        if no_order.any():
-            selected_order_mask[no_order, 0] = True
-        selected_order_scores = selected_order_scores.masked_fill(~selected_order_mask, -1e9)
-        order_dist = Categorical(F.softmax(selected_order_scores, dim=1))
-        log_probs = pair_dist.log_prob(pair_indexes) + order_dist.log_prob(order_indexes)
-        entropies = pair_dist.entropy() + order_dist.entropy()
-        return log_probs, state_values, entropies
+        raise RuntimeError(
+            "observations without 'valid_pairs'/'order_counts' are not supported: "
+            "the legacy dense batch path was removed in the refactor"
+        )
 
 
-    def evaluate(self,
-                 state: object,
-                 ope_ma_adj: torch.Tensor,
-                 ope_pre_adj: torch.Tensor,
-                 ope_sub_adj: torch.Tensor,
-                 raw_opes: torch.Tensor,
-                 raw_mas: torch.Tensor,
-                 proc_time: torch.Tensor,
-                 eligible: torch.Tensor,
-                 action_env: torch.Tensor,
-                 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        根据当前状态和动作对 actor 与 critic 网络输出进行评估，用于 PPO 更新。
-        参数均为单实例数据，不再包含 batch 维度。
-        返回：动作 log 概率、状态价值和策略熵。
-        """
-
-        features = self.get_normalized(raw_opes, raw_mas, proc_time)
-        # features = raw_opes, raw_mas, proc_time
-
-        # L 次 HGNN 传播（这里 L 等于 self.num_heads 的长度）
-        for i in range(len(self.num_heads)):
-            # 第一阶段：机器节点嵌入，得到 h_mas: [batch, num_mas, out_size_ma]
-            h_mas: torch.Tensor = self.get_machines[i](ope_ma_adj, features)  # 传入 features 整体作为额外信息
-            # 更新 features 第二分量为机器嵌入
-            features = (features[0], h_mas, features[2])
-            # 第二阶段：工序节点嵌入，得到 h_opes: [batch, num_opes, out_size_ope]
-            h_opes: torch.Tensor = self.get_operations[i](ope_ma_adj,
-                                                          ope_pre_adj,
-                                                          ope_sub_adj,
-                                                          features)
-            # 更新 features 第一分量为工序嵌入
-            features = (h_opes, features[1], features[2])
-
-        # 对机器节点及工序节点分别做 pooling（取均值）
-        h_mas_pooled: torch.Tensor = torch.mean(h_mas, dim=-2)  # shape: [batch, 1, out_size_ma]
-        h_opes_pooled: torch.Tensor = torch.mean(h_opes, dim=-2)  # shape: [batch, 1, out_size_ope]
-
-        # 提取每种工序中的订单交期形成二维列表
-        max_long_due_date_list = max(state.kind_task_idle_id_due_date_list.values(), key=len)
-        max_long = len(max_long_due_date_list)  # 每个工序类型的最大订单数
-        eligible = eligible.unsqueeze(-1).expand(-1, -1, -1, max_long).clone()
-        h_ords_tensor = torch.full((len(state.kind_task_tuple), len(max_long_due_date_list)), 0, device=self.device,
-                                   dtype=torch.float32)
-        for key, values in state.kind_task_idle_id_due_date_list.items():
-            kind_task_index = state.kind_task_tuple.index(key)
-            for index, due_date in enumerate(values):
-                h_ords_tensor[kind_task_index, index] = due_date
-            # 从eligible中隐去不可选订单索引
-            if 0 < len(values) < max_long:
-                eligible[:, kind_task_index, :, len(values):] = False
-        mean_ords_tensor = torch.mean(h_ords_tensor)
-        std_ords_tensor = torch.std(h_ords_tensor, unbiased=False)
-        h_ords_tensor = (h_ords_tensor - mean_ords_tensor) / (std_ords_tensor + 1e-5)
-        h_ords_padding = h_ords_tensor.unsqueeze(0).unsqueeze(-1).unsqueeze(-3).expand(-1, -1, ope_ma_adj.size(-1), -1,
-                                                                                       -1)
-
-        # 扩展 h_opes 与 h_mas 信息以匹配动作计算所需尺寸
-        h_opes_padding = h_opes.unsqueeze(-2).unsqueeze(-2).expand(-1, -1, ope_ma_adj.size(-1), max_long,
-                                                                   -1)  # [batch, num_opes, num_mas, num_ords, out_size_ope]
-        h_mas_padding = h_mas.unsqueeze(-3).unsqueeze(-2).expand(-1, ope_ma_adj.size(-2), -1, max_long,
-                                                                 -1)  # [batch, num_opes, num_mas, num_ords, out_size_ope]
-        # 同理，对全局 pooling信息扩展到相同尺寸
-        h_mas_pooled_padding = h_mas_pooled.expand_as(
-            h_opes_padding)  # [batch, num_opes, num_mas, num_ords, out_size_ma]
-        h_opes_pooled_padding = h_opes_pooled.expand_as(
-            h_opes_padding)  # [batch, num_opes, num_mas, num_ords, out_size_ope]
-        h_rate_padding = torch.tensor(state.current_order_completed_rate, device=self.device).expand_as(h_ords_padding)
-        """拼接形成 actor 网络的输入：每个动作候选的特征组合"""
-        # 形状：[batch, num_mas, num_opes, num_ords, out_size_ma + out_size_ope + out_size_ope + out_size_ma+1]
-        h_actions = torch.cat((h_opes_padding, h_mas_padding,
-                               h_opes_pooled_padding, h_mas_pooled_padding, h_ords_padding, h_rate_padding),
-                              dim=-1).transpose(1, 2)
-        # 更新新的动作字典
-        self.current_action_dict = {action_index: (action1, action2) for action_index, (action1, action2) in
-                                    enumerate([(i, j) for i in state.action_dict.keys() for j in range(max_long)])}
-        # 候选动作合法性掩码：结合ope_ma_adj与作业/机器状态（这里简化为直接使用 ope_ma_adj 的值）
-        mask = eligible.transpose(1, 2).flatten(1)  # 转置后展平，得到 [batch, num_mas * num_opes]
-
-        # 经过 actor 网络计算动作得分
-        scores: torch.Tensor = self.actor(h_actions.float()).flatten(1)  # [batch, num_mas * num_opes]
-        # 对不合法动作赋予 -inf （注意：eligible 为 True 标示合法）
-        scores[~mask] = float('-inf')
-        action_probs: torch.Tensor = F.softmax(scores, dim=1)  # 计算动作概率分布
-
-        # 计算动作的 log 概率和熵
-        dist = Categorical(action_probs)  # 使用 Categorical 分布处理动作概率
-        action_log_prob = dist.log_prob(action_env)  # action_env 为采样动作索引
-        dist_entropy = dist.entropy()  # 计算策略熵
-        # 评价状态价值（将全局 pooling特征拼接后输入 critic）
-        h_rate_tensor = torch.tensor(state.current_order_completed_rate, device=self.device).unsqueeze(-1).unsqueeze(-1).float()
-        state_value = self.critic(torch.cat((h_opes_pooled, h_mas_pooled, h_rate_tensor), dim=-1))
-
-        return action_log_prob, state_value.squeeze(), dist_entropy

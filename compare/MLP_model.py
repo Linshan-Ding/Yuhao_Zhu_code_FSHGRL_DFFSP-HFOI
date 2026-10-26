@@ -5,14 +5,12 @@ MLP编辑器：去掉图结构，只保留逐点MLP编码
 """
 
 from typing import Tuple, List, Optional
-import copy
 import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
 from agent.mlp import MLPCritic, MLPActor
-import random
 
 
 class NodeMLP(nn.Module):
@@ -31,38 +29,6 @@ class NodeMLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
-
-
-class Memory:
-    def __init__(self):
-        self.states = []
-        self.log_probs = []
-        self.rewards = []
-        self.is_terminals = []
-        self.action_indexes = []
-
-        self.ope_ma_adj = []
-        self.ope_pre_adj = []
-        self.ope_sub_adj = []
-        self.raw_opes = []
-        self.raw_mas = []
-        self.proc_time = []
-        self.eligible = []
-
-    def clear_memory(self):
-        del self.states[:]
-        del self.log_probs[:]
-        del self.rewards[:]
-        del self.is_terminals[:]
-        del self.action_indexes[:]
-
-        del self.ope_ma_adj[:]
-        del self.ope_pre_adj[:]
-        del self.ope_sub_adj[:]
-        del self.raw_opes[:]
-        del self.raw_mas[:]
-        del self.proc_time[:]
-        del self.eligible[:]
 
 
 class MLPScheduler(nn.Module):
@@ -135,8 +101,6 @@ class MLPScheduler(nn.Module):
         self.current_action_dict: Optional[dict] = None
         self.last_forward_stats = {}
 
-    def forward(self) -> None:
-        raise NotImplementedError("Use act() or evaluate() functions instead.")
 
     # ============= 归一化辅助函数 =============
 
@@ -173,153 +137,6 @@ class MLPScheduler(nn.Module):
 
     # ============= 单实例接口（兼容旧版） =============
 
-    def get_action_prob(self, state, memory, flag_train: bool = True):
-        raw_opes: torch.Tensor = state.feat_opes.unsqueeze(0).to(self.device)
-        raw_mas: torch.Tensor = state.feat_mas.unsqueeze(0).to(self.device)
-        proc_time: torch.Tensor = state.proc_times.unsqueeze(0).to(self.device)
-
-        # norm_opes, norm_mas, norm_proc = self.get_normalized(raw_opes, raw_mas, proc_time)
-        norm_opes, norm_mas, norm_proc = raw_opes, raw_mas, proc_time
-
-        eligible: torch.Tensor = state.eligible_fluid.unsqueeze(0).to(self.device)
-
-        # MLP 编码（替代图传播）
-        h_opes, h_mas = self._mlp_encode((norm_opes, norm_mas, norm_proc))
-
-        h_mas_pooled: torch.Tensor = torch.mean(h_mas, dim=-2)
-        h_opes_pooled: torch.Tensor = torch.mean(h_opes, dim=-2)
-
-        max_long_due_date_list = max(state.kind_task_idle_id_due_date_list.values(), key=len)
-        max_long = len(max_long_due_date_list)
-
-        eligibles = eligible.unsqueeze(-1).expand(-1, -1, -1, max_long).clone()
-        h_ords_tensor = torch.full((len(state.kind_task_tuple), max_long), 0.0, device=self.device, dtype=torch.float32)
-        for key, values in state.kind_task_idle_id_due_date_list.items():
-            kind_task_index = state.kind_task_tuple.index(key)
-            for index, due_date in enumerate(values):
-                h_ords_tensor[kind_task_index, index] = due_date
-            if 0 < len(values) < max_long:
-                eligibles[:, kind_task_index, :, len(values):] = False
-
-        mean_ords_tensor = torch.mean(h_ords_tensor)
-        std_ords_tensor = torch.std(h_ords_tensor, unbiased=False)
-        h_ords_tensor = (h_ords_tensor - mean_ords_tensor) / (std_ords_tensor + 1e-5)
-        h_ords_padding = h_ords_tensor.unsqueeze(0).unsqueeze(-1).unsqueeze(-3).expand(-1, -1, eligible.size(-1), -1, -1)
-
-        O, M = eligible.size(-2), eligible.size(-1)
-        h_opes_padding = h_opes.unsqueeze(-2).unsqueeze(-2).expand(-1, O, M, max_long, -1)
-        h_mas_padding = h_mas.unsqueeze(-3).unsqueeze(-2).expand(-1, O, M, max_long, -1)
-        h_mas_pooled_padding = h_mas_pooled.expand_as(h_opes_padding)
-        h_opes_pooled_padding = h_opes_pooled.expand_as(h_opes_padding)
-        h_rate_padding = torch.tensor(state.current_order_completed_rate, device=self.device).expand_as(h_ords_padding)
-
-        h_actions = torch.cat((h_opes_padding, h_mas_padding, h_opes_pooled_padding, h_mas_pooled_padding,
-                               h_ords_padding, h_rate_padding), dim=-1).transpose(1, 2)
-
-        if torch.isnan(h_actions).any():
-            print("组合动作存在NaN")
-
-        self.current_action_dict = {
-            action_index: (action1, action2)
-            for action_index, (action1, action2) in
-            enumerate([(i, j) for i in state.action_dict.keys() for j in range(max_long)])
-        }
-
-        mask = eligibles.transpose(1, 2).flatten(1)
-        scores: torch.Tensor = self.actor(h_actions.float()).flatten(1)
-        scores[~mask] = float('-inf')
-        action_probs: torch.Tensor = F.softmax(scores, dim=1)
-
-        if torch.isnan(action_probs).any():
-            print("kind_task_available_list:", state.kind_task_available_list)
-            print("h_ords_tensor:", h_ords_tensor)
-            print("达成率", state.current_order_completed_rate)
-            print("最大得分:", torch.max(scores))
-
-        if flag_train:
-            memory.ope_ma_adj.append(copy.deepcopy(state.ope_ma_adj.unsqueeze(0).to(self.device)))
-            memory.ope_pre_adj.append(copy.deepcopy(state.ope_pre_adj.unsqueeze(0).to(self.device)))
-            memory.ope_sub_adj.append(copy.deepcopy(state.ope_sub_adj.unsqueeze(0).to(self.device)))
-            memory.raw_opes.append(copy.deepcopy(raw_opes))
-            memory.raw_mas.append(copy.deepcopy(raw_mas))
-            memory.proc_time.append(copy.deepcopy(proc_time))
-            memory.eligible.append(copy.deepcopy(eligible))
-
-        h_opes_mas = torch.cat((h_opes_pooled, h_mas_pooled), dim=-1)
-        return action_probs, h_opes_mas
-
-    def act(self, state: object, memory, epoch, flag_sample: bool = True):
-        action_probs, h_opes_mas = self.get_action_prob(state, memory)
-
-        train_flag = True
-        epsilon = max(self.epsilon * (500 - epoch) / 500, 0.01)
-        dist = Categorical(action_probs)
-        action_index = dist.sample()
-        log_prob = dist.log_prob(action_index)
-
-        action = action_index.item()
-        action1, action2 = self.current_action_dict[action]
-        return action_index, log_prob, action1, action2
-
-    def evaluate(self,
-                 state: object,
-                 ope_ma_adj: torch.Tensor,
-                 ope_pre_adj: torch.Tensor,
-                 ope_sub_adj: torch.Tensor,
-                 raw_opes: torch.Tensor,
-                 raw_mas: torch.Tensor,
-                 proc_time: torch.Tensor,
-                 eligible: torch.Tensor,
-                 action_env: torch.Tensor,
-                 ):
-        # norm_opes, norm_mas, norm_proc = self.get_normalized(raw_opes, raw_mas, proc_time)
-        norm_opes, norm_mas, norm_proc = raw_opes, raw_mas, proc_time
-
-        h_opes, h_mas = self._mlp_encode((norm_opes, norm_mas, norm_proc))
-        h_opes_pooled: torch.Tensor = torch.mean(h_opes, dim=-2)
-        h_mas_pooled: torch.Tensor = torch.mean(h_mas, dim=-2)
-
-        O = h_opes.shape[-2]
-        M = h_mas.shape[-2]
-
-        max_long_due_date_list = max(state.kind_task_idle_id_due_date_list.values(), key=len)
-        max_long = len(max_long_due_date_list)
-        eligible = eligible.unsqueeze(-1).expand(-1, -1, -1, max_long).clone()
-        h_ords_tensor = torch.full((len(state.kind_task_tuple), max_long), 0.0, device=self.device, dtype=torch.float32)
-        for key, values in state.kind_task_idle_id_due_date_list.items():
-            kind_task_index = state.kind_task_tuple.index(key)
-            for index, due_date in enumerate(values):
-                h_ords_tensor[kind_task_index, index] = due_date
-            if 0 < len(values) < max_long:
-                eligible[:, kind_task_index, :, len(values):] = False
-
-        mean_ords_tensor = torch.mean(h_ords_tensor)
-        std_ords_tensor = torch.std(h_ords_tensor, unbiased=False)
-        h_ords_tensor = (h_ords_tensor - mean_ords_tensor) / (std_ords_tensor + 1e-5)
-        h_ords_padding = h_ords_tensor.unsqueeze(0).unsqueeze(-1).unsqueeze(-3).expand(-1, -1, M, -1, -1)
-
-        h_opes_padding = h_opes.unsqueeze(-2).unsqueeze(-2).expand(-1, O, M, max_long, -1)
-        h_mas_padding = h_mas.unsqueeze(-3).unsqueeze(-2).expand(-1, O, M, max_long, -1)
-        h_opes_pool_pad = h_opes_pooled.expand_as(h_opes_padding)
-        h_mas_pool_pad = h_mas_pooled.expand_as(h_opes_padding)
-        h_rate_padding = torch.tensor(state.current_order_completed_rate, device=self.device).expand_as(h_ords_padding)
-
-        h_actions = torch.cat((h_opes_padding, h_mas_padding, h_opes_pool_pad, h_mas_pool_pad,
-                               h_ords_padding, h_rate_padding), dim=-1).transpose(1, 2)
-
-        mask = eligible.transpose(1, 2).flatten(1)
-        scores: torch.Tensor = self.actor(h_actions.float()).flatten(1)
-        scores[~mask] = float('-inf')
-        action_probs: torch.Tensor = F.softmax(scores, dim=1)
-
-        dist = Categorical(action_probs)
-        action_log_prob = dist.log_prob(action_env)
-        dist_entropy = dist.entropy()
-
-        h_rate_tensor = torch.tensor(state.current_order_completed_rate, device=self.device).unsqueeze(-1).unsqueeze(-1).float()
-        state_value = self.critic(torch.cat((h_opes_pooled, h_mas_pooled, h_rate_tensor), dim=-1))
-
-        return action_log_prob, state_value.squeeze(), dist_entropy
 
     # ============= Batch 基础设施 =============
 
@@ -361,77 +178,6 @@ class MLPScheduler(nn.Module):
 
     # ============= Dense Batch Forward（非稀疏路径） =============
 
-    def _policy_forward_batch(self, obs_batch):
-        """Batch 前向：MLP 编码 + Actor/Critic 计算（无图传播）"""
-        start_time = time.perf_counter()
-        batch = self._pad_obs_batch(obs_batch)
-        raw_opes, raw_mas, proc_time = batch["raw_opes"], batch["raw_mas"], batch["proc_time"]
-        eligible = batch["eligible"]
-
-        # 归一化 + MLP 编码（替代 HGNN 图传播循环）
-        features = self.get_normalized(raw_opes, raw_mas, proc_time)
-        h_opes, h_mas = self._mlp_encode(features)
-
-        batch_size, max_opes, _ = h_opes.shape
-        max_mas = h_mas.size(1)
-        max_orders = batch["due_dates"].size(-1)
-
-        h_mas_pooled = torch.mean(h_mas, dim=-2)
-        h_opes_pooled = torch.mean(h_opes, dim=-2)
-
-        # 交期归一化
-        due_dates = batch["due_dates"]
-        valid_due_dates = due_dates[batch["order_mask"]]
-        if valid_due_dates.numel() > 0:
-            due_dates = (due_dates - valid_due_dates.mean()) / (valid_due_dates.std(unbiased=False) + 1e-5)
-
-        # 构造 (machine, task) pair 特征
-        pair_due = due_dates[:, :, :1].expand(-1, -1, max_mas).transpose(1, 2).unsqueeze(-1)
-        pair_rate = batch["current_rate"][:, None, None, None].expand(batch_size, max_mas, max_opes, 1)
-        pair_features = torch.cat((
-            h_opes[:, None, :, :].expand(-1, max_mas, -1, -1),
-            h_mas[:, :, None, :].expand(-1, -1, max_opes, -1),
-            h_opes_pooled[:, None, None, :].expand(-1, max_mas, max_opes, -1),
-            h_mas_pooled[:, None, None, :].expand(-1, max_mas, max_opes, -1),
-            pair_due,
-            pair_rate,
-        ), dim=-1)
-
-        pair_mask = eligible.transpose(1, 2).flatten(1)
-        no_valid = ~pair_mask.any(dim=1)
-        if no_valid.any():
-            pair_mask[no_valid, 0] = True
-        pair_scores = self.actor(pair_features.float()).squeeze(-1).flatten(1).masked_fill(~pair_mask, -1e9)
-        pair_probs = F.softmax(pair_scores, dim=1)
-
-        # 构造 (machine, task, order) 三级特征
-        h_ords_padding = due_dates.unsqueeze(1).unsqueeze(-1).expand(-1, max_mas, -1, -1, -1)
-        order_features = torch.cat((
-            h_opes[:, None, :, None, :].expand(-1, max_mas, -1, max_orders, -1),
-            h_mas[:, :, None, None, :].expand(-1, -1, max_opes, max_orders, -1),
-            h_opes_pooled[:, None, None, None, :].expand(-1, max_mas, max_opes, max_orders, -1),
-            h_mas_pooled[:, None, None, None, :].expand(-1, max_mas, max_opes, max_orders, -1),
-            h_ords_padding,
-            batch["current_rate"][:, None, None, None, None].expand(batch_size, max_mas, max_opes, max_orders, 1),
-        ), dim=-1)
-        order_scores = self.order_actor(order_features.float()).squeeze(-1)
-        order_mask = eligible.transpose(1, 2).unsqueeze(-1) & batch["order_mask"].unsqueeze(1)
-        if no_valid.any():
-            order_mask[no_valid, 0, 0, 0] = True
-
-        state_values = self.critic(torch.cat((h_opes_pooled, h_mas_pooled,
-                                              batch["current_rate"].view(batch_size, 1)), dim=-1)).squeeze(-1)
-
-        valid_tokens = order_mask.flatten(1).sum(dim=1).float()
-        total_tokens = max(order_mask[0].numel(), 1)
-        self.last_forward_stats = {
-            "batch_size": int(batch_size),
-            "avg_action_tokens": float(valid_tokens.mean().detach().cpu().item()),
-            "max_action_tokens": float(valid_tokens.max().detach().cpu().item()),
-            "padding_ratio": float(1.0 - valid_tokens.sum().detach().cpu().item() / max(batch_size * total_tokens, 1)),
-            "forward_seconds": float(time.perf_counter() - start_time),
-        }
-        return pair_probs, order_scores, order_mask, state_values, batch
 
     # ============= Sparse Attention 辅助 =============
 
@@ -586,81 +332,17 @@ class MLPScheduler(nn.Module):
         """Batch 动作采样（rollout 调用入口）"""
         if self._has_sparse_candidates(obs_batch):
             return self._act_batch_sparse(obs_batch, sample=sample)
-
-        pair_probs, order_scores, order_mask, state_values, batch = self._policy_forward_batch(obs_batch)
-        pair_dist = Categorical(pair_probs)
-        pair_indexes = pair_dist.sample() if sample else pair_probs.argmax(dim=1)
-        batch_indexes = torch.arange(len(obs_batch), device=self.device)
-        max_opes = batch["raw_opes"].size(1)
-        max_orders = batch["due_dates"].size(2)
-
-        flat_order_scores = order_scores.reshape(len(obs_batch), -1, max_orders)
-        flat_order_mask = order_mask.reshape(len(obs_batch), -1, max_orders)
-        selected_order_scores = flat_order_scores[batch_indexes, pair_indexes]
-        selected_order_mask = flat_order_mask[batch_indexes, pair_indexes]
-        no_order = ~selected_order_mask.any(dim=1)
-        if no_order.any():
-            selected_order_mask[no_order, 0] = True
-        selected_order_scores = selected_order_scores.masked_fill(~selected_order_mask, -1e9)
-        order_probs = F.softmax(selected_order_scores, dim=1)
-        order_dist = Categorical(order_probs)
-        order_indexes = order_dist.sample() if sample else order_probs.argmax(dim=1)
-        log_probs = pair_dist.log_prob(pair_indexes) + order_dist.log_prob(order_indexes)
-        action_indexes = pair_indexes * max_orders + order_indexes
-
-        env_actions = []
-        for batch_index, pair_index in enumerate(pair_indexes.tolist()):
-            obs = obs_batch[batch_index]
-            local_tasks = int(obs.get("num_tasks", obs["raw_opes"].size(0)))
-            machine_index = int(pair_index) // max_opes
-            task_index = int(pair_index) % max_opes
-            env_actions.append((machine_index * local_tasks + task_index, int(order_indexes[batch_index].item())))
-        return action_indexes, log_probs, state_values, env_actions
+        raise RuntimeError(
+            "observations without 'valid_pairs'/'order_counts' are not supported: "
+            "the legacy dense batch path was removed in the refactor"
+        )
 
     def evaluate_batch(self, obs_batch, actions):
         """Batch 评估（PPO update 调用入口）"""
         if self._has_sparse_candidates(obs_batch) and not torch.is_tensor(actions):
             return self._evaluate_batch_sparse(obs_batch, actions)
-
-        pair_probs, order_scores, order_mask, state_values, batch = self._policy_forward_batch(obs_batch)
-        pair_dist = Categorical(pair_probs)
-        batch_size = len(obs_batch)
-        max_orders = batch["due_dates"].size(2)
-        max_opes = batch["raw_opes"].size(1)
-
-        if torch.is_tensor(actions):
-            action_indexes = actions.to(self.device).long()
-            pair_indexes = torch.div(action_indexes, max_orders, rounding_mode="floor")
-            order_indexes = action_indexes % max_orders
-        else:
-            pair_indexes, order_indexes = self._env_actions_to_pair_order_indexes(
-                obs_batch, actions, max_opes, max_orders)
-
-        batch_indexes = torch.arange(batch_size, device=self.device)
-        flat_order_scores = order_scores.reshape(batch_size, -1, max_orders)
-        flat_order_mask = order_mask.reshape(batch_size, -1, max_orders)
-        selected_order_scores = flat_order_scores[batch_indexes, pair_indexes]
-        selected_order_mask = flat_order_mask[batch_indexes, pair_indexes]
-        no_order = ~selected_order_mask.any(dim=1)
-        if no_order.any():
-            selected_order_mask[no_order, 0] = True
-        selected_order_scores = selected_order_scores.masked_fill(~selected_order_mask, -1e9)
-        order_dist = Categorical(F.softmax(selected_order_scores, dim=1))
-        log_probs = pair_dist.log_prob(pair_indexes) + order_dist.log_prob(order_indexes)
-        entropies = pair_dist.entropy() + order_dist.entropy()
-        return log_probs, state_values, entropies
-
-    def _env_actions_to_pair_order_indexes(self, obs_batch, env_actions, max_opes: int, max_orders: int):
-        pair_indexes = []
-        order_indexes = []
-        for obs, env_action in zip(obs_batch, env_actions):
-            action1, order_index = env_action
-            local_tasks = int(obs.get("num_tasks", obs["raw_opes"].size(0)))
-            task_index = int(action1) % local_tasks
-            machine_index = int(action1) // local_tasks
-            pair_indexes.append(machine_index * max_opes + task_index)
-            order_indexes.append(min(max(int(order_index), 0), max_orders - 1))
-        return (
-            torch.tensor(pair_indexes, dtype=torch.long, device=self.device),
-            torch.tensor(order_indexes, dtype=torch.long, device=self.device),
+        raise RuntimeError(
+            "observations without 'valid_pairs'/'order_counts' are not supported: "
+            "the legacy dense batch path was removed in the refactor"
         )
+
