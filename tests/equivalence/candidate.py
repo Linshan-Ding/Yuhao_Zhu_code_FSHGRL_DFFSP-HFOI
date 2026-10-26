@@ -16,7 +16,7 @@ from .common import INSTANCE_NAME, MAX_ITERATIONS, ROOT, SEED, WORK_DIR, golden_
 
 
 def instance_path() -> Path:
-    return ROOT / "data" / "instance" / "competition" / INSTANCE_NAME
+    return ROOT / "data" / "instances" / "benchmark" / Path(INSTANCE_NAME).stem / INSTANCE_NAME
 
 
 def overlay_for(model_type: str, experiment_name: str) -> dict:

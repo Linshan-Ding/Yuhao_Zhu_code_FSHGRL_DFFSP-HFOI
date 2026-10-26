@@ -15,12 +15,13 @@ from train import build_model_paras  # noqa: E402
 LEGACY = json.loads((ROOT / "tests" / "golden" / "legacy_config.json").read_text(encoding="utf-8"))
 
 # every train_paras key the code reads (train.py, rollout.py, environment/simulator.py, agent/ppo.py,
-# agent/visualization.py); `model_type` is read with a default in the legacy code
+# agent/visualization.py); `model_type` is read with a default in the legacy code. `train_data_dir` is
+# compared separately: the instances moved into per-instance folders, so the path differs by design.
 TRAIN_KEYS = [
     "lr", "min_lr", "lr_schedule", "betas", "gamma", "gae_lambda", "K_epochs", "eps_clip", "A_coeff",
     "vf_coeff", "entropy_coeff", "max_grad_norm", "target_kl", "max_iterations", "minibatch_size",
     "max_minibatch_tokens", "num_envs", "num_workers", "rollout_device", "update_device", "resume",
-    "checkpoint_interval", "experiment_name", "train_data_dir", "train_patterns", "train_instances",
+    "checkpoint_interval", "experiment_name", "train_patterns", "train_instances",
     "instance_selection", "discard_penalty", "progress_reward_coeff", "order_top_k", "fluid_mode",
     "fluid_time_limit", "fluid_threads", "use_sparse_attention", "sparse_attention_scope",
     "sparse_attention_heads", "sparse_attention_dropout", "viz", "viz_name", "visdom_server",
@@ -70,3 +71,16 @@ def test_ablation_overlays_change_only_their_keys():
             if key in ("fluid_mode", "experiment_name"):
                 continue
             assert _same(paras["train_paras"][key], base["train_paras"][key]), key
+
+
+def test_data_dir_resolves_the_benchmark_set():
+    """The data directory differs from the legacy JSON by design; the resolved instance set is the same 15 files."""
+    from data.dataset import resolve_instance_files
+
+    bridged = to_legacy_config(load_config())
+    assert bridged["train_paras"]["train_data_dir"] == "data/instances/benchmark"
+    assert LEGACY["train_paras"]["train_data_dir"] == "data/instance/competition"
+    files = resolve_instance_files(str(ROOT / bridged["train_paras"]["train_data_dir"]),
+                                   bridged["train_paras"]["train_patterns"], None)
+    expected = sorted(f"DDT{ddt}_num{n}.txt" for ddt in (500, 600, 900, 1200, 1600) for n in (50, 100, 150))
+    assert sorted(path.name for path in files) == expected

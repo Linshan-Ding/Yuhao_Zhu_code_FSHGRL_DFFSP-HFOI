@@ -106,6 +106,9 @@ def _episode_record(simulator: TrainingSimulator, total_reward: float, wall_seco
         "fluid_solve_seconds": float(simulator.fluid_solve_seconds),
         "fluid_cache_hit_count": int(simulator.fluid_cache_hit_count),
         "fluid_fallback_count": int(simulator.fluid_fallback_count),
+        # provided by environment/profiled.py (eval.py); NaN / empty with the plain simulator
+        "fluid_feature_seconds": float(getattr(simulator, "fluid_feature_seconds", float("nan"))),
+        "fluid_backend": str(getattr(simulator, "fluid_backend", "")),
     }
 
 
