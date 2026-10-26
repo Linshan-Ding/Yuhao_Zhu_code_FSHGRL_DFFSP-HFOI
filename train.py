@@ -278,7 +278,7 @@ def main():
     rollout_device_name = train_paras.get("rollout_device", "cpu")
     update_device = resolve_torch_device(update_device_name, fallback="cpu")
     rollout_device = resolve_torch_device(rollout_device_name, fallback="cpu")
-    data_dir = resolve_data_dir(args.data_dir or train_paras.get("train_data_dir", "data/instance/competition"))
+    data_dir = resolve_data_dir(args.data_dir or train_paras.get("train_data_dir", "data/instances/benchmark"))
     patterns = train_paras.get("train_patterns", ["*.txt"])
     if isinstance(patterns, str):
         patterns = [patterns]

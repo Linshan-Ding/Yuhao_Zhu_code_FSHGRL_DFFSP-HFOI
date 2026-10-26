@@ -9,18 +9,17 @@ import torch.nn.functional as F
 # 根据 train_paras 中的 model_type 选择调度器：
 #   "hgnn"  (默认) → HGNNScheduler（异质图神经网络）
 #   "mlp"           → agent/networks_mlp.py 的 MLPScheduler（去图结构消融实验）
-#   "hgnn_no_fluid" → HGNN_model_no_fluid 中的 HGNNScheduler（去流体消融实验）
+#   "hgnn_no_fluid" → 已移除（无流体消融改用 env.fluid_mode: off）
 def _resolve_scheduler_class(train_paras: dict):
     model_type = str(train_paras.get("model_type", "hgnn")).lower()
     if model_type == "mlp":
         from agent.networks_mlp import MLPScheduler
         return MLPScheduler
     if model_type == "hgnn_no_fluid":
-        try:
-            from compare.HGNN_model_no_fluid import HGNNScheduler as NoFluidScheduler
-        except ImportError:
-            from HGNN_model_no_fluid import HGNNScheduler as NoFluidScheduler
-        return NoFluidScheduler
+        raise ValueError(
+            "model_type 'hgnn_no_fluid' was removed in the refactor (the module could not run under this "
+            "trainer); use model_type 'hgnn' with env.fluid_mode: off (configs/ablation/nf.yaml)"
+        )
     # 默认 hgnn
     from agent.networks import HGNNScheduler
     return HGNNScheduler

@@ -41,7 +41,7 @@ class GeneratorCfg:
 @dataclass
 class InstanceCfg:
     problem: str = "dffsp_hfoi"
-    data_dir: str = "data/instance/competition"
+    data_dir: str = "data/instances/benchmark"
     patterns: list = field(default_factory=lambda: ["DDT*.txt", "num*.txt", "train_num*.txt"])
     train_instances: list = field(default_factory=lambda: ["DDT500_num100.txt"])
     instance_selection: str = "fixed"
