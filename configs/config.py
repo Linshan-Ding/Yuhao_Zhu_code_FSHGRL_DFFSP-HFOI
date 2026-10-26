@@ -113,6 +113,21 @@ class TrainCfg:
 
 
 @dataclass
+class OffPolicyCfg:
+    """Replay / target-network settings of the DQN and DDQN baselines (ignored by PPO and A2C)."""
+    replay_capacity: int = 50000
+    replay_batch_size: int = 128
+    updates_per_iteration: int = 50
+    warmup_transitions: int = 500
+    target_update_steps: int = 50
+    target_tau: float = 0.0
+    epsilon_start: float = 1.0
+    epsilon_end: float = 0.01
+    epsilon_decay_iterations: int = 500
+    td_loss: str = "mse"
+
+
+@dataclass
 class VizCfg:
     viz: bool = True
     viz_name: str = "HGNN_PPO_Training"
@@ -132,6 +147,7 @@ class AlgoCfg:
     attention: AttentionCfg = field(default_factory=AttentionCfg)
     train: TrainCfg = field(default_factory=TrainCfg)
     viz: VizCfg = field(default_factory=VizCfg)
+    offpolicy: OffPolicyCfg = field(default_factory=OffPolicyCfg)
 
 
 @dataclass
@@ -218,6 +234,7 @@ def legacy_train_paras(cfg: Config) -> dict:
     paras.update(asdict(cfg.env))
     paras.update(asdict(cfg.algo.attention))
     paras.update(asdict(cfg.algo.viz))
+    paras.update(asdict(cfg.algo.offpolicy))
     paras.update({
         "train_data_dir": cfg.instance.data_dir,
         "train_patterns": list(cfg.instance.patterns),

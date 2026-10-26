@@ -53,11 +53,15 @@ def load_policy_state(path: Path, device) -> dict:
 
 def build_scheduler(config: dict, train_paras: dict, device) -> torch.nn.Module:
     """Construct the (untrained) policy network described by a legacy-shaped config and train_paras."""
-    from agent.ppo import _resolve_scheduler_class
+    from agent.factory import build_policy_network
     from train import build_model_paras
 
     model_paras = build_model_paras(config, torch.device(device), train_paras)
-    return _resolve_scheduler_class(train_paras)(model_paras).to(torch.device(device))
+    network = build_policy_network(model_paras, train_paras)
+    if hasattr(network, "set_device"):
+        network.set_device(torch.device(device))
+        return network
+    return network.to(torch.device(device))
 
 
 def load_policy(path: Path, device, config: dict | None = None, train_paras: dict | None = None):

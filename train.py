@@ -18,6 +18,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from agent.checkpoint import load_checkpoint, save_checkpoint
+from agent.factory import OFF_POLICY, algorithm_of, build_agent
 from agent.ppo import PPO
 from configs.config import DEFAULT_CONFIG_FILES, load_config as load_yaml_config, to_legacy_config
 from data.dataset import resolve_instance_files, select_instance
@@ -42,7 +43,8 @@ def load_config(config_paths) -> dict:
     return to_legacy_config(load_yaml_config(paths))
 
 
-SMOKE_OVERRIDES = {"max_iterations": 2, "num_envs": 2, "num_workers": 2, "minibatch_size": 128, "viz": False}
+SMOKE_OVERRIDES = {"max_iterations": 2, "num_envs": 2, "num_workers": 2, "minibatch_size": 128, "viz": False,
+                   "updates_per_iteration": 10, "warmup_transitions": 50}   # the last two: DQN / DDQN only
 
 
 def resolve_data_dir(path_value: str) -> Path:
@@ -286,8 +288,14 @@ def main():
         requested_instances = parse_instances([config_instances]) if isinstance(config_instances, str) else config_instances
     instance_files = resolve_instance_files(str(data_dir), patterns, requested_instances)
 
+    if algorithm_of(train_paras) in OFF_POLICY:          # DQN / DDQN: replay-based loop (new code)
+        from agent.baselines.offpolicy import train_offpolicy
+
+        train_offpolicy(args, config, train_paras, instance_files, rollout_device, update_device)
+        return
+
     model_paras = build_model_paras(config, update_device, train_paras)
-    model = PPO(model_paras, train_paras)
+    model = build_agent(model_paras, train_paras)        # PPO for algorithm ppo (unchanged object), A2C otherwise
     exp_name = args.experiment_name or train_paras.get("experiment_name", "default")
     result_dir = ROOT_DIR / "result"/ exp_name
     result_dir.mkdir(parents=True, exist_ok=True)

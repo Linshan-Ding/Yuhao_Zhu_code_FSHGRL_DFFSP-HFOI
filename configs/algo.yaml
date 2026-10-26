@@ -64,3 +64,14 @@ algo:
                   policy_forward_seconds, avg_action_tokens, max_action_tokens, padding_ratio,
                   actor_batch_size_mean, policy_act_seconds, simulator_step_seconds, obs_build_seconds,
                   cpu_memory_mb, gpu_memory_mb, gpu_temperature, completion_count, discard_count]
+  offpolicy:                  # DQN / DDQN baselines only (configs/baselines/*.yaml); ignored by PPO and A2C
+    replay_capacity: 50000    # transitions kept in the replay buffer
+    replay_batch_size: 128
+    updates_per_iteration: 50 # gradient steps after each collection of num_envs episodes
+    warmup_transitions: 500   # no updates before the replay holds this many transitions
+    target_update_steps: 50   # gradient steps between hard target-network copies (once per iteration)
+    target_tau: 0.0           # > 0: soft target update with this rate instead of hard copies
+    epsilon_start: 1.0        # epsilon-greedy exploration, linear decay (the original formula)
+    epsilon_end: 0.01
+    epsilon_decay_iterations: 500
+    td_loss: mse              # mse (original) | huber
