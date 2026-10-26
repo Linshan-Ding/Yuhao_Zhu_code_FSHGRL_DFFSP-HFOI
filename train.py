@@ -1,8 +1,9 @@
 import argparse
 import copy
-import csv
 import json
+import math
 import os
+import platform
 import random
 import subprocess
 import sys
@@ -18,10 +19,12 @@ if str(ROOT_DIR) not in sys.path:
 
 from agent.checkpoint import load_checkpoint, save_checkpoint
 from agent.ppo import PPO
-from agent.visualization import TrainingVisualizer
-from configs.config import load_config as load_yaml_config, to_legacy_config
+from configs.config import DEFAULT_CONFIG_FILES, load_config as load_yaml_config, to_legacy_config
 from data.dataset import resolve_instance_files, select_instance
-from rollout import collect_vectorized_rollouts
+from data.instance_io import parse_instance_file
+from result.logger import RunLogger, TrainingVisualizer, git_commit_hash, write_metrics  # noqa: F401  (re-exported)
+from result.metrics import gap_pct, gpu_utilization, load_reference, objective_from_fulfillment
+from rollout import collect_vectorized_rollouts, run_episodes
 
 
 def load_config(config_paths) -> dict:
@@ -55,35 +58,6 @@ def set_seed(seed: int):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-
-
-def write_metrics(metrics_path: Path, row: dict):
-    metrics_path.parent.mkdir(parents=True, exist_ok=True)
-    exists = metrics_path.exists()
-    write_header = (not exists) or metrics_path.stat().st_size == 0
-    fieldnames = list(row.keys())
-    if exists:
-        with metrics_path.open("r", newline="", encoding="utf-8") as file:
-            reader = csv.DictReader(file)
-            existing_fields = [field for field in (reader.fieldnames or []) if field is not None]
-            if existing_fields and existing_fields != fieldnames:
-                rows = []
-                for old_row in reader:
-                    old_row.pop(None, None)
-                    rows.append({name: old_row.get(name, "") for name in existing_fields})
-                fieldnames = existing_fields + [name for name in fieldnames if name not in existing_fields]
-                with metrics_path.open("w", newline="", encoding="utf-8") as rewrite_file:
-                    writer = csv.DictWriter(rewrite_file, fieldnames=fieldnames, extrasaction="ignore")
-                    writer.writeheader()
-                    writer.writerows(rows)
-                write_header = False
-            elif existing_fields:
-                fieldnames = existing_fields
-    with metrics_path.open("a", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=fieldnames, extrasaction="ignore")
-        if write_header:
-            writer.writeheader()
-        writer.writerow(row)
 
 
 def parse_instances(values):
@@ -176,6 +150,92 @@ def apply_lr_schedule(model: PPO, train_paras: dict, iteration: int, max_iterati
     return lr
 
 
+def evaluate_fixed_set(policy, instance_files, train_paras: dict, reference: dict) -> list:
+    """Greedy rollout of the current policy on every training instance (the curve.csv sampling protocol).
+
+    New code: one complete episode per instance with argmax decoding under torch.no_grad(); it draws no
+    random numbers, so running it after each PPO update leaves the training stream untouched
+    (tests/equivalence runs with eval_every=1 and checks bit-identical training results).
+    """
+    rows = []
+    for path in instance_files:
+        spec = parse_instance_file(path)
+        episode = run_episodes(policy, spec, train_paras, episodes=1, sample=False)[0]
+        obj = objective_from_fulfillment(episode["fulfillment_rate"])
+        rows.append({
+            "instance_id": path.stem,
+            "instance_name": path.name,
+            "obj": obj,
+            "gap": gap_pct(obj, reference.get(path.stem)),
+            "feasible": True,
+            "fulfillment_rate": episode["fulfillment_rate"],
+            "completed": episode["completed"],
+            "discarded": episode["discarded"],
+            "decision_count": episode["decision_count"],
+            "eval_seconds": episode["wall_seconds"],
+        })
+    return rows
+
+
+def paradigm_name(instance_files) -> str:
+    return "per_instance" if len(instance_files) == 1 else "fixed_set"
+
+
+def build_snapshot(args, train_paras: dict, model_paras: dict, instance_files, rollout_device, update_device,
+                   start_iteration: int, max_iterations: int) -> dict:
+    """Content of result/<run>/config_snapshot.yaml: the effective configuration and provenance."""
+    try:
+        import gurobipy  # noqa: F401
+
+        gurobi_available = True
+    except Exception:
+        gurobi_available = False
+    return {
+        "command": [Path(sys.argv[0]).name, *sys.argv[1:]],
+        "config_files": [str(item) for item in (args.config or DEFAULT_CONFIG_FILES)],
+        "seed": args.seed,
+        "paradigm": paradigm_name(instance_files),
+        "instance_selection": train_paras.get("instance_selection", "fixed"),
+        "instances": [path.name for path in instance_files],
+        "algorithm": train_paras.get("algorithm", "ppo"),
+        "model_type": train_paras.get("model_type", "hgnn"),
+        "train_version": train_paras.get("train_version"),
+        "start_iteration": start_iteration,
+        "max_iterations": max_iterations,
+        "rollout_device": str(rollout_device),
+        "update_device": str(update_device),
+        "git_commit": git_commit_hash(ROOT_DIR),
+        "python": platform.python_version(),
+        "torch": torch.__version__,
+        "gurobipy_available": gurobi_available,
+        "model_paras": model_paras,
+        "train_paras": train_paras,
+    }
+
+
+def finalize_run(logger: RunLogger, stop_reason: str, start_iteration: int, last_iteration: int,
+                 best_fulfillment_rate: float, best_greedy_obj: float, best_greedy_iteration: int,
+                 train_paras: dict, instance_files) -> None:
+    """Write fixed_set_final.csv and train_meta.yaml (called from the trainer's finally block)."""
+    wall_time_s = round(logger.wall_time(), 3)
+    logger.write_final(epochs=last_iteration + 1, wall_time_s=wall_time_s)
+    logger.write_meta({
+        "stop_reason": stop_reason,
+        "epochs_run": max(last_iteration - start_iteration + 1, 0),
+        "start_iteration": start_iteration,
+        "last_iteration": last_iteration,
+        "wall_time_s": wall_time_s,
+        "best_sampled_fulfillment_rate": best_fulfillment_rate if math.isfinite(best_fulfillment_rate) else None,
+        "best_greedy_obj": best_greedy_obj if math.isfinite(best_greedy_obj) else None,
+        "best_greedy_iteration": best_greedy_iteration if best_greedy_iteration >= 0 else None,
+        "paradigm": paradigm_name(instance_files),
+        "eval_set": "train_set",
+        "n_instances": len(instance_files),
+        "train_version": train_paras.get("train_version"),
+        "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    })
+
+
 def main():
     parser = argparse.ArgumentParser(description="Parallel HGNN-PPO trainer")
     parser.add_argument("--config", nargs="+", default=None,
@@ -207,6 +267,9 @@ def main():
         train_paras["update_device"] = args.update_device
     if args.resume is not None:
         train_paras["resume"] = args.resume
+    if not train_paras.get("train_confirmed", True) and not args.smoke:
+        raise SystemExit("[FAIL] the training-parameter table is not confirmed: review configs/algo.yaml "
+                         "(algo.train_confirmed) or pass --smoke")
     set_seed(args.seed)
 
     update_device_name = args.device or train_paras.get("update_device") or ("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -223,14 +286,14 @@ def main():
         requested_instances = parse_instances([config_instances]) if isinstance(config_instances, str) else config_instances
     instance_files = resolve_instance_files(str(data_dir), patterns, requested_instances)
 
-    model = PPO(build_model_paras(config, update_device, train_paras), train_paras)
-    visualizer = TrainingVisualizer(train_paras)
+    model_paras = build_model_paras(config, update_device, train_paras)
+    model = PPO(model_paras, train_paras)
     exp_name = args.experiment_name or train_paras.get("experiment_name", "default")
     result_dir = ROOT_DIR / "result"/ exp_name
     result_dir.mkdir(parents=True, exist_ok=True)
-    metrics_path = result_dir / "train_metrics.csv"
     last_checkpoint_path = result_dir / "last_checkpoint.pt"
     best_checkpoint_path = result_dir / "best_checkpoint.pt"
+    best_greedy_checkpoint_path = result_dir / "best_greedy_checkpoint.pt"
     best_fulfillment_rate = float("-inf")
     trajectory_base = 0
     start_iteration = 0
@@ -242,6 +305,16 @@ def main():
             print(f"[Checkpoint] Could not resume from {last_checkpoint_path}: {exc}. Starting fresh.")
 
     max_iterations = int(train_paras.get("max_iterations", 1000))
+    logger = RunLogger(result_dir, train_paras, resume=start_iteration > 0)
+    reference = load_reference()
+    logger.write_snapshot(build_snapshot(args, train_paras, model_paras, instance_files, rollout_device,
+                                         update_device, start_iteration, max_iterations))
+    eval_every = int(train_paras.get("eval_every", 1))
+    checkpoint_every = int(train_paras.get("checkpoint_every", 0))
+    best_greedy_obj = float("inf")
+    best_greedy_iteration = -1
+    last_iteration = start_iteration - 1
+    stop_reason = "running"
     try:
         for iteration in range(start_iteration, max_iterations):
             if update_device.type == "cuda" and torch.cuda.is_available():
@@ -323,9 +396,7 @@ def main():
                 "gpu_memory_mb": resources["gpu_memory_mb"],
                 "gpu_temperature": resources["gpu_temperature"],
             }
-            write_metrics(metrics_path, row)
-            visualizer.log(iteration, row)
-            print(row)
+            logger.log_legacy(iteration, row)
 
             if fulfillment_metrics["fulfillment_rate_mean"] >= best_fulfillment_rate:
                 best_fulfillment_rate = fulfillment_metrics["fulfillment_rate_mean"]
@@ -334,8 +405,71 @@ def main():
             checkpoint_interval = max(int(train_paras.get("checkpoint_interval", 1)), 1)
             if iteration % checkpoint_interval == 0:
                 save_checkpoint(last_checkpoint_path, model, iteration, best_fulfillment_rate, train_paras, config)
+
+            # ---- experiment-contract files (new code; the greedy evaluation draws no random numbers) ----
+            logger.env_steps += len(rollout)
+            fixed_obj_mean = fixed_gap_mean = fixed_fulfillment_mean = eval_seconds = ""
+            if eval_every > 0 and iteration % eval_every == 0:
+                eval_start_time = time.time()
+                eval_policy = prepare_rollout_policy(model, rollout_device, update_device)
+                saved_forward_stats = getattr(eval_policy, "last_forward_stats", None)
+                greedy_rows = evaluate_fixed_set(eval_policy, instance_files, train_paras, reference)
+                if saved_forward_stats is not None:
+                    eval_policy.last_forward_stats = saved_forward_stats
+                sampled_best_obj = objective_from_fulfillment(fulfillment_metrics["fulfillment_rate_max"])
+                wall_time_s = round(logger.wall_time(), 3)
+                for greedy_row in greedy_rows:
+                    greedy_row["wall_time_s"] = wall_time_s
+                    if greedy_row["instance_name"] == selected_instance.name:
+                        greedy_row["obj_best"] = min(greedy_row["obj"], sampled_best_obj)
+                logger.curve(iteration, greedy_rows)
+                fixed_obj_mean = float(np.mean([greedy_row["obj"] for greedy_row in greedy_rows]))
+                fixed_fulfillment_mean = 1.0 - fixed_obj_mean
+                gaps = [greedy_row["gap"] for greedy_row in greedy_rows if not math.isnan(greedy_row["gap"])]
+                fixed_gap_mean = float(np.mean(gaps)) if gaps else float("nan")
+                eval_seconds = round(time.time() - eval_start_time, 3)
+                if fixed_obj_mean < best_greedy_obj:
+                    best_greedy_obj = fixed_obj_mean
+                    best_greedy_iteration = iteration
+                    save_checkpoint(best_greedy_checkpoint_path, model, iteration, best_fulfillment_rate,
+                                    train_paras, config)
+            logger.log(iteration, {
+                "env_steps": logger.env_steps,
+                "wall_time_s": round(logger.wall_time(), 3),
+                "train_obj_mean": objective_from_fulfillment(fulfillment_metrics["fulfillment_rate_mean"]),
+                "fixed_obj_mean": fixed_obj_mean,
+                "fixed_gap_mean": fixed_gap_mean,
+                "policy_loss": row["policy_loss"],
+                "value_loss": row["value_loss"],
+                "entropy": row["entropy"],
+                "clip_frac": row["clip_fraction"],
+                "approx_kl": row["approx_kl"],
+                "lr": learning_rate,
+                "sps": steps_per_second,
+                "gpu_util": gpu_utilization(update_device),
+                "gpu_mem_gb": resources["gpu_memory_mb"] / 1024.0 if update_device.type == "cuda" else "",
+                "train_fulfillment_mean": fulfillment_metrics["fulfillment_rate_mean"],
+                "fixed_fulfillment_mean": fixed_fulfillment_mean,
+                "eval_seconds": eval_seconds,
+            })
+            if checkpoint_every > 0 and iteration % checkpoint_every == 0:
+                save_checkpoint(result_dir / f"checkpoint_epoch{iteration:04d}.pt", model, iteration,
+                                best_fulfillment_rate, train_paras, config)
+            last_iteration = iteration
+        stop_reason = "max_iterations"
+    except KeyboardInterrupt:
+        stop_reason = "interrupted"
+        raise
+    except Exception:
+        stop_reason = "error"
+        raise
     finally:
-        visualizer.close()
+        try:
+            finalize_run(logger, stop_reason, start_iteration, last_iteration, best_fulfillment_rate,
+                         best_greedy_obj, best_greedy_iteration, train_paras, instance_files)
+        except Exception as exc:  # never mask the training error
+            print(f"[RunLogger] could not write the run summary: {exc}")
+        logger.close()
 
 
 if __name__ == "__main__":

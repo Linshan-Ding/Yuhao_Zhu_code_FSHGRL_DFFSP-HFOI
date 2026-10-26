@@ -8,7 +8,9 @@ venv/
 *.pt
 *.pth
 *.log
-result/
+result/*
+!result/__init__.py
+!result/*.py
 photo/
 .pytest_cache/
 tests/golden/_work/

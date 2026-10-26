@@ -5,6 +5,7 @@ know where the instance lives and how the trainer is started.
 """
 from __future__ import annotations
 
+import csv
 import shutil
 import sys
 from pathlib import Path
@@ -57,3 +58,30 @@ def run_candidate(base_config: dict, model_type: str, log_path: Path) -> Path:
     ]
     run_subprocess(cmd, ROOT, log_path)
     return ROOT / "result" / experiment_name
+
+
+def check_contract_files(result_dir: Path) -> tuple[list[str], str]:
+    """The per-run files added by the refactor (not compared against golden; existence and row counts)."""
+    problems: list[str] = []
+
+    def row_count(name: str) -> int:
+        path = result_dir / name
+        if not path.exists():
+            problems.append(f"{name} missing")
+            return -1
+        with path.open(newline="", encoding="utf-8") as file:
+            return sum(1 for _ in csv.DictReader(file))
+
+    curve_rows = row_count("curve.csv")
+    log_rows = row_count("log.csv")
+    final_rows = row_count("fixed_set_final.csv")
+    if curve_rows != MAX_ITERATIONS:
+        problems.append(f"curve.csv has {curve_rows} rows, expected {MAX_ITERATIONS}")
+    if log_rows != MAX_ITERATIONS:
+        problems.append(f"log.csv has {log_rows} rows, expected {MAX_ITERATIONS}")
+    if final_rows != 1:
+        problems.append(f"fixed_set_final.csv has {final_rows} rows, expected 1")
+    for name in ("config_snapshot.yaml", "train_meta.yaml", "best_greedy_checkpoint.pt"):
+        if not (result_dir / name).exists():
+            problems.append(f"{name} missing")
+    return problems, f"curve.csv {curve_rows} rows, log.csv {log_rows} rows"

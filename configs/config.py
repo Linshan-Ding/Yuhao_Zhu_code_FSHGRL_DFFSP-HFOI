@@ -225,6 +225,8 @@ def legacy_train_paras(cfg: Config) -> dict:
         "instance_selection": cfg.instance.instance_selection,
         "model_type": cfg.algo.model_type,
         "algorithm": cfg.algo.algorithm,
+        "train_confirmed": bool(cfg.algo.train_confirmed),
+        "train_version": int(cfg.algo.train_version),
     })
     return paras
 

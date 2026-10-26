@@ -19,4 +19,6 @@ TARGETS = [
     ("agent/train.py", "load_checkpoint", "agent/checkpoint.py", "load_checkpoint"),
     ("agent/train.py", "prepare_rollout_policy", "train.py", "prepare_rollout_policy"),
     ("agent/sci_rollout.py", "select_instance", "data/dataset.py", "select_instance"),
+    ("agent/train.py", "write_metrics", "result/logger.py", "write_metrics"),
+    ("agent/visualization.py", "TrainingVisualizer", "result/logger.py", "TrainingVisualizer"),
 ]

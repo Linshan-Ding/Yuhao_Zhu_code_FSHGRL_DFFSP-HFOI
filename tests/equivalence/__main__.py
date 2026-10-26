@@ -189,6 +189,9 @@ def main() -> int:
             report.append(f"L6 end-to-end [{model_type}]: {'OK' if not mism else f'{len(mism)} mismatch(es)'} "
                           f"(float columns exact {e}/{n}; checkpoint tensors exact {exact}/{tensors})")
             failures.extend(f"L6 {model_type}: {m}" for m in mism[:30])
+            side_problems, side_summary = candidate.check_contract_files(result_dir)
+            report.append(f"L6 contract files [{model_type}]: {'OK' if not side_problems else 'FAIL'} ({side_summary})")
+            failures.extend(f"L6 {model_type}: {m}" for m in side_problems)
 
     print("\n".join(report))
     if failures:
