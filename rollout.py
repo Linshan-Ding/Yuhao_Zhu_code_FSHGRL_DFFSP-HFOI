@@ -127,6 +127,7 @@ def run_episodes(policy, spec, train_paras: dict, episodes: int = 1, sample: boo
     must not depend on the batch composition are produced with ``episodes=1``.
     """
     simulators = [simulator_factory(spec, train_paras) for _ in range(episodes)]
+    counts_at_start = [(int(s.completed_count), int(s.discarded_count), float(s.fulfillment_rate)) for s in simulators]
     start_times = [time.perf_counter() for _ in range(episodes)]
     finished = [False for _ in range(episodes)]
     total_rewards = [0.0 for _ in range(episodes)]
@@ -156,8 +157,9 @@ def run_episodes(policy, spec, train_paras: dict, episodes: int = 1, sample: boo
         for local_index, env_index in enumerate(active_indices):
             total_rewards[env_index] += simulators[env_index].step(env_actions[local_index])
 
-    for record in records:
+    for index, record in enumerate(records):
         record["policy_forward_seconds"] = forward_seconds   # shared by the lockstep batch
         record["policy_forward_count"] = forward_count
         record["batch_episodes"] = episodes
+        record["completed_at_start"], record["discarded_at_start"], record["fulfillment_rate_at_start"] = counts_at_start[index]
     return records
