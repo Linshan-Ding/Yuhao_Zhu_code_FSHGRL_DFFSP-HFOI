@@ -56,3 +56,7 @@
     `heuristic_fallback`）；LP 求解代码以 AST 逐字比对保证与原仓库一致（`tests/equivalence/ast_targets.py`）。
     即使安装了 Gurobi，`fluid_threads: 0` 下求解器自身的多线程也可能带来跨机器的微小差异。
 20. **Windows 上 rollout 设备**：原仓库把 rollout 固定在 CPU 以规避显卡驱动 TDR 重启，重构保留该默认。
+21. **多进程采集与 Gurobi**：`env.collector_workers > 0` 时流体 LP 在 worker 进程内求解，每个 worker 各需一个 Gurobi
+    环境/许可证；`fluid_threads: 0` 加时间限制本就可能跨运行不确定（第 19 条），只有 `fluid_threads: 1` 且不触发时间
+    限制时才能期望逐位一致。无 gurobipy 的启发式回退在进程内与多进程下逐位一致（`tests/test_collector.py`）。
+    DQN/DDQN 的采集器与贪心评估仍在训练进程内，该键对它们无效。

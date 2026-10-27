@@ -14,3 +14,6 @@
 - C8 `result/stats.py`（精确 Wilcoxon + Holm + Friedman）、`result/plot.py`、`result/aggregate.py`、`paper_assets/`。
 - C9 `scripts/run_00..09 + run_all`、`configs/{smoke,runs,parallel,pilot}.yaml`、`data/generator.py`、README 十节、`docs/`。
 - C10 收尾验证与汇报。
+- C11 多进程轨迹采集（`environment/collector.py`、`rollout.collect_vectorized_rollouts_parallel`、`env.collector_workers`）：
+  仿真器与观测构建分到 worker 进程，策略前向、采样与更新留在训练进程，同 `num_envs` 下采集数据逐位一致
+  （`tests/test_collector.py`、`python -m tests.equivalence --collector-workers 3`）；`tools/profile_collector.py` 定档；默认关闭。

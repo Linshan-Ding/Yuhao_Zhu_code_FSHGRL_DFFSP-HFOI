@@ -57,7 +57,7 @@ Python 3.10 以上（本次验证 3.13）；CPU 即可运行，有 NVIDIA GPU �
 pip install -r requirements.txt
 ```
 
-安装自检（单元测试 31 个，约 15 s；数值等价回归 L1–L7，约 3 min，在首次运行时自动检出原仓库提交生成黄金文件）：
+安装自检（单元测试 35 个，约 50 s；数值等价回归 L1–L7，约 3 min，在首次运行时自动检出原仓库提交生成黄金文件）：
 
 ```
 python -m pytest tests
@@ -74,9 +74,12 @@ python -m tests.equivalence
 | §6 规则基线 `run_06`（15 算例 × 6 规则，随机规则 10 次） | 1 min |
 | §7 评测，每个检查点（贪心 + 10 次采样） | 约 30 s |
 | 完整 run 矩阵（§5–§6，180 个训练作业） | CPU 上数周；论文平台为 i5-14600KF + RTX 4060 Ti（本次未在 GPU 上验证） |
+| 多进程采集（§5 的 `collector_workers`，8 环境，DDT500_num50） | 采集墙钟由 5.0 s 降到 3.7 s（3 个 worker，1.36 倍，低于 1.5 倍的开启门槛，默认保持 0）；worker 启动约 1.9 s |
 
 `tools/profile_num_envs.py` 给出本机 `num_envs` 与采样吞吐的关系（1/2/4/8 环境分别约 131/156/157/174 转移每秒，
-策略前向与观测构建各占一半），`configs/algo.yaml` 保留原仓库的 `num_envs: 8`。
+策略前向与观测构建各占一半），`configs/algo.yaml` 保留原仓库的 `num_envs: 8`。`tools/profile_collector.py` 比较 0 到 3 个
+环境 worker 进程的采集吞吐并断言各配置采到相同轨迹：策略前向（约 2.2 s）必须留在训练进程以保证逐位一致，
+本机 3 个 worker 只把采集提速 1.36 倍，因此 `configs/env.yaml` 默认 `collector_workers: 0`；换机器后重跑该工具定档。
 
 ## 3. 冒烟自检（先跑这条，约 1 分钟）
 
@@ -125,6 +128,12 @@ python scripts/run_03_train_ours.py
 `train_meta.yaml`（停止原因、轮数、墙钟、最优值）、`fixed_set_final.csv`（训练末在位解）。
 被中断的作业重跑时从 `last_checkpoint.pt` 续训；已完成的作业（存在 `train_meta.yaml`）自动跳过。
 想看实时曲线：**另开一个终端标签页**执行 `python -m visdom.server`，并把 `configs/algo.yaml` 的 `viz.viz` 置 true。
+
+多进程采集：`configs/env.yaml` 的 `collector_workers` 置 N，即把仿真器推进与观测构建分到 N 个 worker 进程，策略前向、
+动作采样与 PPO 更新仍在训练进程；同一 `num_envs` 下采集到的数据与进程内路径**逐位一致**（`tests/test_collector.py`，
+`python -m tests.equivalence --collector-workers 3`）。单次运行可用 `python train.py --collector-workers 3` 覆盖。
+是否值得开启看 §2 的实测：本机 4 核 CPU 上更新阶段占大头，收益有限；更新在 GPU 上或 S=150 的算例时收益更明显。
+DQN/DDQN 与贪心评估不受该键影响。
 
 ## 6. 基线与消融
 
@@ -192,7 +201,9 @@ python scripts/run_all.py 1
 例如 `[PARALLEL] requested 4, clamped to 3: 4 cores - 0 environment workers - 1`；作业因内存不足失败时并发度自动降
 一档并重排该作业，下限 1 路。传 `1` 即全串行，排障时用。每个作业写自己的 `result/<作业名>/stdout.log`，控制台只打印
 进度表。一次改全部脚本的默认值就改 `configs/parallel.yaml`（`max_concurrent`，以及每作业的 BLAS 线程数
-`threads_per_job`，默认 1 以保证各作业耗时可比）。
+`threads_per_job`，默认 1 以保证各作业耗时可比）。脚本按 `configs/env.yaml` 的 `collector_workers` 扣减每个作业占用的
+环境 worker 进程数（夹取公式：核数 − 环境 worker 数 − 1），开启环境 worker 会相应降低作业并发度；本机 4 核上
+作业级并发（2 路）比环境 worker 更划算。
 
 | 步骤 | 可并行 | 资源 | 默认路数 |
 |---|---|---|---|

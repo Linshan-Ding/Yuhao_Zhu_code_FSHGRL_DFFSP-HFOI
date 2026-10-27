@@ -28,13 +28,15 @@
 | `test_code/` | 删除 | — |
 | `README.md` | 十节复现手册 | 重写；旧"训练机制 / 配置要点"并入 §1 与 `configs/*.yaml` 的注释 |
 | （无） | `eval.py`、`environment/profiled.py`、`tools/`、`scripts/`、`result/{aggregate,metrics,stats,plot}.py`、`data/generator.py`、`docs/`、`tests/` | 新增 |
+| （无） | `environment/collector.py` + `rollout.collect_vectorized_rollouts_parallel`（多进程采集，默认关闭，数据逐位一致） | 新增（C11） |
 
 ## 丢弃的配置键（原 JSON 中无人读取）
 
 `env_paras` 整段、`test_paras` 整段，以及 `train_paras` 中的 `simulator_backend`、`fluid_recompute_interval`、
 `rollout_steps`、`target_transitions` 等 12 个键：代码中没有任何读取点，YAML 中不再保留。
 全部被读取的键（44 个 `train_paras` 键、13 个 `model_paras` 键）由 `tests/test_config_bridge.py` 逐键比对值与类型。
-新增键：`eval_every`、`checkpoint_every`、`train_confirmed`、`train_version`、`algorithm`，以及 `algo.offpolicy` 段。
+新增键：`eval_every`、`checkpoint_every`、`train_confirmed`、`train_version`、`algorithm`、`algo.offpolicy` 段，以及
+`env.collector_workers`、`env.collector_start_method`（多进程采集；0 即原路径）。
 
 ## 弃用接口（仅转发，不再维护）
 

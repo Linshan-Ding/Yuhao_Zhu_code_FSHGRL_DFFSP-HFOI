@@ -143,6 +143,14 @@ def instance_ids(*tiers) -> list:
         return [row["instance_id"] for row in csv.DictReader(file) if not tiers or row["tier"] in tiers]
 
 
+def collector_workers_cfg() -> int:
+    """env.collector_workers of configs/env.yaml: environment worker processes each training job starts."""
+    try:
+        return max(0, int((read_yaml(ROOT / "configs" / "env.yaml").get("env") or {}).get("collector_workers", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def pilot_cfg() -> dict:
     return read_yaml(ROOT / "configs" / "pilot.yaml")
 
@@ -188,9 +196,12 @@ def free_ram_gb():
         return None
 
 
-def resolve_workers(default: int, resource: str = "cpu", gpu_mem_per_job_gb=None, env_workers: int = 0,
+def resolve_workers(default: int, resource: str = "cpu", gpu_mem_per_job_gb=None, env_workers: int | None = None,
                     parallel: bool = True) -> int:
-    """Clamp the requested concurrency to what the machine supports and say why (never silently)."""
+    """Clamp the requested concurrency to what the machine supports and say why (never silently).
+    ``env_workers`` (environment worker processes per job) defaults to configs/env.yaml collector_workers."""
+    if env_workers is None:
+        env_workers = collector_workers_cfg()
     want = requested_workers(default)
     if not parallel:
         print(f"[PARALLEL] this script runs serially (PARALLEL=False; request {want} ignored)", flush=True)

@@ -25,7 +25,7 @@ from data.dataset import resolve_instance_files, select_instance
 from data.instance_io import parse_instance_file
 from result.logger import RunLogger, TrainingVisualizer, git_commit_hash, write_metrics  # noqa: F401  (re-exported)
 from result.metrics import gap_pct, gpu_utilization, load_reference, objective_from_fulfillment
-from rollout import collect_vectorized_rollouts, run_episodes
+from rollout import collect_vectorized_rollouts, collect_vectorized_rollouts_parallel, run_episodes
 
 
 def load_config(config_paths) -> dict:
@@ -253,6 +253,8 @@ def main():
     parser.add_argument("--instances", nargs="*", default=None)
     parser.add_argument("--instance-selection", choices=["fixed", "round_robin", "random"], default=None)
     parser.add_argument("--resume", choices=["auto", "none"], default=None)
+    parser.add_argument("--collector-workers", type=int, default=None,
+                        help="simulators in N worker processes during collection (0 = in-process, the original path)")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -269,6 +271,8 @@ def main():
         train_paras["update_device"] = args.update_device
     if args.resume is not None:
         train_paras["resume"] = args.resume
+    if args.collector_workers is not None:
+        train_paras["collector_workers"] = int(args.collector_workers)
     if not train_paras.get("train_confirmed", True) and not args.smoke:
         raise SystemExit("[FAIL] the training-parameter table is not confirmed: review configs/algo.yaml "
                          "(algo.train_confirmed) or pass --smoke")
@@ -291,6 +295,8 @@ def main():
     if algorithm_of(train_paras) in OFF_POLICY:          # DQN / DDQN: replay-based loop (new code)
         from agent.baselines.offpolicy import train_offpolicy
 
+        if int(train_paras.get("collector_workers", 0) or 0) > 0:
+            print("[Collector] dqn / ddqn keep the in-process collector; collector_workers is ignored")
         train_offpolicy(args, config, train_paras, instance_files, rollout_device, update_device)
         return
 
@@ -323,6 +329,19 @@ def main():
     best_greedy_iteration = -1
     last_iteration = start_iteration - 1
     stop_reason = "running"
+    collector = None
+    collector_workers = int(train_paras.get("collector_workers", 0) or 0)
+    if collector_workers > 0:                            # simulators in worker processes (new code; bit-identical)
+        from environment.collector import CollectorPool
+
+        start_method = str(train_paras.get("collector_start_method", "spawn") or "spawn")
+        if update_device.type == "cuda" and start_method != "spawn":
+            print(f"[Collector] start method '{start_method}' is unsafe after CUDA initialisation; using spawn")
+            start_method = "spawn"
+        collector = CollectorPool(int(train_paras.get("num_envs", train_paras.get("num_workers", 4))),
+                                  collector_workers, start_method)
+        print(f"[Collector] {collector.workers} worker process(es) for {collector.num_envs} environments "
+              f"({start_method}, start-up {collector.startup_seconds:.1f} s)")
     try:
         for iteration in range(start_iteration, max_iterations):
             if update_device.type == "cuda" and torch.cuda.is_available():
@@ -333,7 +352,11 @@ def main():
             instance_index, selected_instance = select_instance(instance_files, instance_selection, iteration)
             rollout_start_time = time.time()
             rollout_policy = prepare_rollout_policy(model, rollout_device, update_device)
-            rollout = collect_vectorized_rollouts(rollout_policy, selected_instance, train_paras, trajectory_base)
+            if collector is None:
+                rollout = collect_vectorized_rollouts(rollout_policy, selected_instance, train_paras, trajectory_base)
+            else:
+                rollout = collect_vectorized_rollouts_parallel(rollout_policy, selected_instance, train_paras,
+                                                               trajectory_base, pool=collector)
             rollout_seconds = time.time() - rollout_start_time
             num_envs = int(train_paras.get("num_envs", train_paras.get("num_workers", 4)))
             trajectory_base += num_envs
@@ -477,6 +500,8 @@ def main():
                          best_greedy_obj, best_greedy_iteration, train_paras, instance_files)
         except Exception as exc:  # never mask the training error
             print(f"[RunLogger] could not write the run summary: {exc}")
+        if collector is not None:
+            collector.close()
         logger.close()
 
 

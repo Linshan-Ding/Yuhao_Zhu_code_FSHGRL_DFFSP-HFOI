@@ -139,6 +139,8 @@ def main() -> int:
     parser.add_argument("--regenerate-golden", action="store_true")
     parser.add_argument("--determinism", action="store_true", help="re-run golden and compare golden vs golden")
     parser.add_argument("--model-types", nargs="*", default=list(MODEL_TYPES))
+    parser.add_argument("--collector-workers", type=int, default=0,
+                        help="also run the L6 candidate with N environment worker processes (must match golden too)")
     args = parser.parse_args()
 
     WORK_DIR.mkdir(parents=True, exist_ok=True)
@@ -192,6 +194,23 @@ def main() -> int:
             side_problems, side_summary = candidate.check_contract_files(result_dir)
             report.append(f"L6 contract files [{model_type}]: {'OK' if not side_problems else 'FAIL'} ({side_summary})")
             failures.extend(f"L6 {model_type}: {m}" for m in side_problems)
+            if args.collector_workers > 0:
+                tag = f"{model_type}, collector_workers={args.collector_workers}"
+                result_dir = candidate.run_candidate(base_config, model_type,
+                                                     WORK_DIR / f"candidate_{model_type}_cw{args.collector_workers}.log",
+                                                     collector_workers=args.collector_workers)
+                mism, n, e = compare_csv(golden_csv, result_dir / "train_metrics.csv")
+                tensors = exact = 0
+                for name in CHECKPOINT_FILES:
+                    t, x = compare_checkpoint(golden_pt_dir / name, result_dir / name, mism)
+                    tensors += t
+                    exact += x
+                report.append(f"L6 end-to-end [{tag}]: {'OK' if not mism else f'{len(mism)} mismatch(es)'} "
+                              f"(float columns exact {e}/{n}; checkpoint tensors exact {exact}/{tensors})")
+                failures.extend(f"L6 {tag}: {m}" for m in mism[:30])
+                side_problems, side_summary = candidate.check_contract_files(result_dir)
+                report.append(f"L6 contract files [{tag}]: {'OK' if not side_problems else 'FAIL'} ({side_summary})")
+                failures.extend(f"L6 {tag}: {m}" for m in side_problems)
 
     print("\n".join(report))
     if failures:

@@ -56,6 +56,8 @@ class EnvCfg:
     fluid_mode: str = "cached_lp"
     fluid_time_limit: float = 2
     fluid_threads: int = 0
+    collector_workers: int = 0            # 0 = simulators in the trainer process; N > 0 = N worker processes
+    collector_start_method: str = "spawn"  # spawn | fork | forkserver (spawn is forced when CUDA is used)
 
 
 @dataclass

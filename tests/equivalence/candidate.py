@@ -19,12 +19,15 @@ def instance_path() -> Path:
     return ROOT / "data" / "instances" / "benchmark" / Path(INSTANCE_NAME).stem / INSTANCE_NAME
 
 
-def overlay_for(model_type: str, experiment_name: str) -> dict:
-    """The golden train_paras overrides expressed in the YAML layout."""
+def overlay_for(model_type: str, experiment_name: str, collector_workers: int = 0) -> dict:
+    """The golden train_paras overrides expressed in the YAML layout (plus the collector when requested)."""
     o = golden_train_overrides(model_type)
+    env = {"fluid_mode": o["fluid_mode"]}
+    if collector_workers > 0:
+        env["collector_workers"] = int(collector_workers)
     return {
         "instance": {"train_instances": o["train_instances"], "instance_selection": o["instance_selection"]},
-        "env": {"fluid_mode": o["fluid_mode"]},
+        "env": env,
         "algo": {
             "model_type": o["model_type"],
             "train": {key: o[key] for key in ("num_envs", "num_workers", "minibatch_size", "max_minibatch_tokens",
@@ -35,16 +38,18 @@ def overlay_for(model_type: str, experiment_name: str) -> dict:
     }
 
 
-def run_candidate(base_config: dict, model_type: str, log_path: Path) -> Path:
+def run_candidate(base_config: dict, model_type: str, log_path: Path, collector_workers: int = 0) -> Path:
     """Run the current tree's trainer for the reference configuration.
 
     Returns the directory holding train_metrics.csv and the checkpoints.
     """
-    experiment_name = f"eq_{model_type}"
+    suffix = f"_cw{collector_workers}" if collector_workers > 0 else ""
+    experiment_name = f"eq_{model_type}{suffix}"
     shutil.rmtree(ROOT / "result" / experiment_name, ignore_errors=True)  # the trainer appends to an existing CSV
-    overlay_path = WORK_DIR / f"overlay_{model_type}.yaml"
+    overlay_path = WORK_DIR / f"overlay_{model_type}{suffix}.yaml"
     overlay_path.parent.mkdir(parents=True, exist_ok=True)
-    overlay_path.write_text(yaml.safe_dump(overlay_for(model_type, experiment_name), sort_keys=False), encoding="utf-8")
+    overlay_path.write_text(yaml.safe_dump(overlay_for(model_type, experiment_name, collector_workers), sort_keys=False),
+                            encoding="utf-8")
     cmd = [
         sys.executable, "train.py",
         "--config", "configs/instance.yaml", "configs/env.yaml", "configs/algo.yaml", str(overlay_path),
